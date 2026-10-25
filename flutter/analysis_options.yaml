@@ -1,0 +1,14 @@
+analyzer:
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - windows/**
+    - macos/**
+    - linux/**
+include: package:lints/recommended.yaml
+
+linter:
+  rules:
+    non_constant_identifier_names: false
+    sort_child_properties_last: false
