@@ -1,0 +1,6 @@
+; Import library for sas.dll, which the Windows SDK ships for MSVC as sas.lib but
+; mingw-w64 does not package at all. host/src/platform/windows.rs links "sas" for SendSAS,
+; so host/build.rs turns this .def into libsas.a with dlltool for GNU targets.
+LIBRARY sas.dll
+EXPORTS
+    SendSAS

@@ -1,0 +1,648 @@
+name: Build release (Android + host)
+
+# Two independent job families, one directory each:
+#   android/  the pure Java Android client  -> android-release-apk
+#   host/     the Rust RustDesk host        -> host-release-<platform>-<arch>
+# The jobs are independent on purpose: a broken dependency in the Rust build must not cost us the
+# Android artifact, and vice versa.
+#
+# host/ no longer uses vcpkg or Flutter. It links the distribution/MSYS2 copies of
+# libvpx/libaom/libyuv/libopus through "--features system-libs":
+#   Linux   Ubuntu packages + a hand-written libyuv.pc (Ubuntu ships no .pc for it)
+#   Windows MSYS2 UCRT64 packages + rustup's x86_64-pc-windows-gnu toolchain
+#
+# CXXFLAGS for host/'s C++ comes from host/.cargo/config.toml, not from the job environment:
+# webm-sys (git dependency rust-webm) compiles libwebm, whose mkvparser/mkvparser.cc is missing
+# #include <cstdint>, which GCC 13+ (Ubuntu 24.04, MSYS2 UCRT64) rejects. Cargo only reads
+# .cargo/config.toml from the working directory upwards and these steps run at the repo root, so
+# their cargo commands pass "--config host/.cargo/config.toml".
+#
+# .github/workflows/android-apk.yml was deleted by this change. It no longer matched the
+# repository after the host/ + android/ split: it ran
+#   flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs
+#   ./flutter/build_android_deps.sh
+# but none of src/flutter_ffi.rs, flutter/, target/ or flutter/build_android_deps.sh exists at the
+# repository root any more (the Rust tree, including those scripts, lives under host/, and android/
+# builds a pure Java APK), and it still built through Flutter + vcpkg.
+#
+# hwcodec is deliberately not wired here: its build.rs needs a vcpkg-layout *static* FFmpeg tree,
+# while host/scripts/fetch-ffmpeg.* fetch the GPL *shared* prebuilts for manual use (nothing
+# consumes FFMPEG_DIR/FFMPEG_PKG_CONFIG_PATH), so enabling the feature would panic.
+on:
+  push:
+    paths:
+      - 'android/**'
+      - 'host/**'
+      - '.github/workflows/build-release.yml'
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'host/**'
+      - '.github/workflows/build-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# GitHub gives private repositories 2000 minutes a month (Linux 1x). When a branch is pushed again
+# the old run has no value; cancelling it saves quota and stops two jobs racing for the same cache.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # cargo's coloured output survives in the log, which is what makes the pkg-config errors around
+  # "error: failed to run custom build command" readable; the retry count covers transient 5xx from
+  # crates.io / services.gradle.org.
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: '5'
+
+jobs:
+  # ------------------------------------------------------------------ Android client
+  android:
+    name: Android client (release APK)
+    runs-on: ubuntu-latest
+    # The job hard limit is 6 hours; this project builds in 47 s locally, 30 minutes is plenty to
+    # locate a hang.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest has about 14 GB of disk; Android SDK + Gradle cache + build output can run
+      # out, which is the most common mysterious Android CI failure. Drop the toolchains this
+      # project does not use first.
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          df -h / | tail -n 1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk \
+                      /usr/local/lib/android/sdk/system-images || true
+          df -h / | tail -n 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          # "cache: gradle" is deliberately not passed: gradle/actions/setup-gradle below already
+          # restores ~/.gradle, and two actions writing the same cache dir fight each other.
+
+      # android/ ships gradle/wrapper/gradle-wrapper.properties but no gradle-wrapper.jar, so
+      # ./gradlew does not exist. Install the exact distribution instead of the wrapper.
+      - name: Set up Gradle 8.14.3
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      # android-actions/setup-android@v3 is deliberately not used: it runs "sdkmanager tools",
+      # and Google removed that package from the repository, so the action fails with exit 1 before
+      # our build even starts. The runner image already ships a complete SDK with sdkmanager on
+      # PATH and ANDROID_HOME set, so install the packages we need directly.
+      #
+      # Only the missing packages (already installed is a no-op), which avoids a full SDK update
+      # and the licence prompts:
+      #   platforms;android-36  -- app/build.gradle's compileSdk/targetSdk is 36
+      #   build-tools;36.0.0    -- builds for the 36 platform
+      #   build-tools;35.0.0    -- AGP 8.11.1 may pick 35 by default; install both to remove that
+      #                            uncertainty (no-op when already present)
+      - name: Install platform and build tools
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          if [ -z "$sdk" ] || [ ! -d "$sdk" ]; then
+            echo "::error::no ANDROID_SDK_ROOT/ANDROID_HOME on this runner, or it is not a directory"
+            exit 1
+          fi
+          echo "sdk=$sdk"
+          # The runner puts cmdline-tools/<ver>/bin on PATH; fall back to a scan when the image
+          # changes that.
+          sdkmanager_bin="$(command -v sdkmanager || true)"
+          if [ -z "$sdkmanager_bin" ]; then
+            for cand in "$sdk/cmdline-tools/latest/bin/sdkmanager" "$sdk"/cmdline-tools/*/bin/sdkmanager; do
+              if [ -x "$cand" ]; then sdkmanager_bin="$cand"; break; fi
+            done
+          fi
+          if [ -z "$sdkmanager_bin" ]; then
+            echo "::error::sdkmanager not found (PATH and $ANDROID_HOME/cmdline-tools/*/bin)"
+            ls -l "$sdk" || true
+            exit 1
+          fi
+          echo "sdkmanager=$sdkmanager_bin"
+          # The SDK directory normally belongs to the runner user; if an image changes that,
+          # take it back before installing (Gradle also has to read it as this user).
+          if [ ! -w "$sdk" ]; then
+            echo "$sdk not writable by $(id -un), taking ownership"
+            sudo chown -R "$(id -un)" "$sdk"
+          fi
+          if [ ! -w "$sdk" ]; then
+            echo "::error::$sdk is still not writable by $(id -un)"
+            exit 1
+          fi
+          yes | "$sdkmanager_bin" --sdk_root="$sdk" --licenses > /dev/null 2>&1 || true
+          # --list_installed prints a table whose first column is the package path; compare that
+          # column exactly so "build-tools;35.0.0" cannot prefix-match another row.
+          have="$("$sdkmanager_bin" --sdk_root="$sdk" --list_installed 2>/dev/null \
+                  | awk -F'|' 'NF > 2 { gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1 }' || true)"
+          for pkg in "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0"; do
+            if printf '%s\n' "$have" | grep -qxF "$pkg"; then
+              echo "$pkg: already installed"
+            else
+              echo "$pkg: installing"
+              "$sdkmanager_bin" --sdk_root="$sdk" --install "$pkg" 2>&1 | tee -a build-logs/sdkmanager.log
+            fi
+          done
+          "$sdkmanager_bin" --sdk_root="$sdk" --list_installed \
+            | grep -E 'platforms;android-36|build-tools;3[56]\.0\.0' || true
+
+      - name: Point Gradle at the SDK
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          if [ -z "$sdk" ]; then
+            echo "::error::no ANDROID_SDK_ROOT or ANDROID_HOME on this runner"
+            exit 1
+          fi
+          # The committed android/local.properties points at a local Windows path; override it with
+          # the runner SDK.
+          printf 'sdk.dir=%s\n' "$sdk" > android/local.properties
+          cat android/local.properties
+
+      # Release is signed with the committed shared test keystore (android/app/build.gradle), so the
+      # artifact verifies with apksigner below but must never be published. Swapping in a private
+      # keystore means passing it as a secret instead of committing one.
+      - name: Gradle assembleRelease
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs
+          # setup-gradle puts the distribution on PATH (the repo has no gradle-wrapper.jar, so
+          # ./gradlew does not exist); fail with one clear line if the action did not run.
+          if ! command -v gradle > /dev/null; then
+            echo "::error::gradle not on PATH: gradle/actions/setup-gradle did not provision 8.14.3"
+            exit 1
+          fi
+          gradle --version
+          # 2>&1 | tee leaves the full Gradle output for the failure artifact below. pipefail keeps
+          # Gradle's exit code.
+          gradle -p android assembleRelease --console=plain --stacktrace 2>&1 \
+            | tee build-logs/gradle.log
+
+      - name: Check and verify the release APK
+        run: |
+          set -euo pipefail
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          if [ ! -f "$apk" ]; then
+            echo "::error::assembleRelease succeeded but $apk is missing"
+            find android/app/build/outputs -name '*.apk' -print || true
+            exit 1
+          fi
+          ls -l "$apk"
+          # The build signs with the committed shared test key, so the artifact must verify.
+          signer="$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner | sort | tail -n 1)"
+          "$signer" verify --print-certs "$apk"
+
+      # This runs after assembleRelease, so Gradle has already populated
+      # $GRADLE_USER_HOME/caches/modules-2 with protobuf-javalite/bcprov/okhttp/okio. The
+      # compile set matches group B of android/tools/selftest/run-selftest.ps1:
+      #   hbb/** (protobuf-generated) + crypto/net/session (minus two Android files) + 5 host classes
+      #   session/Session.java        -> imports codec.VideoDecoder -> android.media.MediaCodec
+      #   session/DeviceIdentity.java -> imports android.content.Context / SharedPreferences
+      # None of these sources import android.*, so they compile on a plain JVM (verified locally).
+      - name: JVM self-test
+        run: |
+          set -euo pipefail
+          java_root=android/app/src/main/java
+          out=/tmp/st
+          rm -rf "$out"; mkdir -p "$out"
+          gcache="${GRADLE_USER_HOME:-$HOME/.gradle}/caches"
+          find_jar() {
+            find "$gcache" -name "$1" ! -name '*-sources.jar' ! -name '*-javadoc.jar' 2>/dev/null | head -n 1
+          }
+          protobuf_jar="$(find_jar 'protobuf-javalite-*.jar')"
+          bcprov_jar="$(find_jar 'bcprov-jdk18on-*.jar')"
+          if [ -z "$protobuf_jar" ] || [ -z "$bcprov_jar" ]; then
+            echo "::error::could not find the dependency jars under $gcache (gradle cache missing?)"
+            exit 1
+          fi
+          cp="$(find "$java_root/hbb" -name '*.java')"
+          javac -encoding UTF-8 -nowarn -cp "$protobuf_jar:$bcprov_jar" -d "$out" $cp
+          okhttp_jar="$(find_jar 'okhttp-4*.jar')"
+          okio_jar="$(find_jar 'okio-jvm-*.jar')"
+          if [ -z "$okhttp_jar" ] || [ -z "$okio_jar" ]; then
+            echo "::error::okhttp/okio jars missing from $gcache (net/WsTransport needs them)"
+            exit 1
+          fi
+          echo "protobuf=$protobuf_jar"
+          echo "bcprov=$bcprov_jar"
+          echo "okhttp=$okhttp_jar"
+          echo "okio=$okio_jar"
+          module_cp="$protobuf_jar:$bcprov_jar:$okhttp_jar:$okio_jar"
+          javac -encoding UTF-8 -nowarn -cp "$module_cp:$out" -d "$out" \
+            $(find "$java_root/com/rustdesk/java/crypto" "$java_root/com/rustdesk/java/net" \
+                   "$java_root/com/rustdesk/java/session" -name '*.java' \
+               | grep -v '/Session.java$' | grep -v '/DeviceIdentity.java$') \
+            "$java_root/com/rustdesk/java/host/HostSession.java" \
+            "$java_root/com/rustdesk/java/host/HostInputSink.java" \
+            "$java_root/com/rustdesk/java/host/HostClipboardSink.java" \
+            "$java_root/com/rustdesk/java/host/HostRegistration.java" \
+            "$java_root/com/rustdesk/java/host/HostAgent.java"
+          java -cp "$module_cp:$out" com.rustdesk.java.crypto.SelfTest 2>&1 \
+            | tee build-logs/selftest.log
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      # On failure carry the logs teed above: Gradle's error is in the expanded stacktrace, and the
+      # web log view truncates it. Paths must stay inside the workspace (upload-artifact v4 rejects
+      # /tmp).
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-failure-logs
+          path: |
+            build-logs/**
+            android/app/build/reports/**
+            android/app/build/outputs/logs/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ------------------------------------------------------------------ Rust host (Linux + Windows matrix)
+  host:
+    name: Host (${{ matrix.platform }}-${{ matrix.arch }})
+    # Each entry produces host-release-<platform>-<arch>. fail-fast is off so one broken platform
+    # still leaves the other artifacts intact.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x64
+            os: ubuntu-latest
+            binary: rustdesk
+          - platform: linux
+            arch: arm64
+            os: ubuntu-24.04-arm
+            binary: rustdesk
+          - platform: windows
+            arch: x64
+            os: windows-latest
+            binary: rustdesk.exe
+    runs-on: ${{ matrix.os }}
+    # RustDesk's release profile is lto = true + codegen-units = 1 and has 600+ crates: 40-70 min
+    # cold on a 2-core runner, a few minutes with a warm cargo cache. 180 minutes leaves room for
+    # the slower Windows GNU build and stays well inside the 6 hour hard limit.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Linux dependencies --------------------------------------------------------------
+      # The package list comes from "cargo tree --target x86_64-unknown-linux-gnu" (default
+      # features) and the crates' build.rs files, not from a copied "common packages" list. Each
+      # group names the crate / .pc file that needs it. Extra packages cost tens of MB; a missing
+      # one is a "failed to run custom build command" minutes later.
+      # A debconf prompt on a runner without a TTY is what turns this step into a 50 minute hang
+      # instead of a fast failure, so every apt call is non-interactive and keeps local config.
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+          DPKG_OPTS=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+          # One apt call per group, so the comment can sit next to the package names instead of
+          # after a continuation backslash (which would split the command).
+          apt_install() { sudo -E env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${DPKG_OPTS[@]}" \
+            -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"; }
+
+          # Toolchain: cc/cxx builds (kcp-sys, webm-sys, magnum-opus, libsodium-sys); bindgen needs
+          # libclang (scrap/build.rs, v4l2-sys-mit); nasm/yasm for mozjpeg-sys
+          # (nokhwa -> image decode); cmake for several -sys crates; perl+make for openssl-src
+          # (openssl is vendored).
+          apt_install build-essential g++ gcc make perl pkg-config cmake nasm yasm ninja-build \
+              clang llvm libclang-dev
+
+          # openssl-src / openssl-sys / reqwest(native-tls): libssl. zstd-sys / libz: zlib.
+          apt_install libssl-dev zlib1g-dev
+
+          # gtk 0.18 (gtk-sys/gdk-sys/gio-sys/glib-sys 0.18 and tao's 0.10);
+          # atk-sys/cairo-sys-rs/pango-sys/gdk-pixbuf-sys come in through libgtk-3-dev's Depends.
+          apt_install libgtk-3-dev libglib2.0-dev
+
+          # Audio: libpulse-sys/libpulse-simple-sys (pulse 2.27) need libpulse; alsa-sys only
+          # builds on non-Linux, libasound2-dev is cheap; libpipewire-0.3 is the build-side header
+          # for gstreamer1.0-pipewire.
+          apt_install libasound2-dev libpulse-dev libpipewire-0.3-dev
+
+          # GStreamer: gstreamer-sys 0.9.1 <- gstreamer 0.16 (core, PC: gstreamer-1.0);
+          # gstreamer-base-sys is in core; gstreamer-app-sys / gstreamer-video-sys need
+          # plugins-base (PC: gstreamer-app-1.0, gstreamer-video-1.0); plugins-bad provides
+          # codecparsers, not built by default but kept for the optional hardware-codec feature.
+          apt_install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev
+
+          # X11: x11 crate 2.21 links -lX11 (libx11-dev is mandatory); gdkx11-sys'
+          # gdk-x11-3.0.pc Requires x11/xext/xcb; xfixes/xdamage/xtst/xi/xrandr/cursor/xft/
+          # xinerama/xmu/render/xscrnsaver/xxf86vm are the libdirs x11-dl and enigo's build.rs
+          # look up (enigo just gets None when missing, but scraping/input backends dlopen these
+          # at runtime, so installing them matches a real desktop).
+          apt_install libx11-dev libxext-dev libxfixes-dev libxdamage-dev libxtst-dev libxi-dev \
+              libxrandr-dev libxcursor-dev libxft-dev libxinerama-dev libxmu-dev \
+              libxrender-dev libxss-dev libxxf86vm-dev libxkbcommon-dev \
+              libxkbcommon-x11-dev
+
+          # xcb: libxcb1-dev + the extensions (scrap's XCB capture, smithay-client-toolkit).
+          apt_install libxcb1-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+              libxcb-render0-dev libxcb-shm0-dev
+
+          # dbus 0.9 -> libdbus-sys 0.2.5, build.rs finds dbus-1 through pkg-config; without it
+          # the build writes -ldbus-1 and fails at link time. scrap (wayland feature) and the root
+          # dbus-crossroads both need it -- the most fatal gap in the old list.
+          apt_install libdbus-1-dev
+
+          # wayland: softbuffer enables wayland-backend's client_system, so wayland-sys 0.31.7
+          # gets the "client" feature (no dlopen) and must find wayland-client through pkg-config;
+          # wayland-cursor is in the same package.
+          apt_install libwayland-dev
+
+          # DRM/GBM/VA: softbuffer's kms feature compiles drm 0.12 -> drm-sys 0.7 (PC: libdrm);
+          # libgbm/libva are only used by the optional drm/hardware-codec features, kept so a
+          # feature switch does not discover a missing package.
+          apt_install libdrm-dev libgbm-dev libva-dev
+
+          # Input/device/service management: evdev uses ioctl and does not need libevdev (kept);
+          # libxdo-sys is patched to a dlopen stub (host/libs/libxdo-sys-stub), so the build does
+          # not need libxdo-dev -- it stays installed for upstream-CI parity; libudev/libsystemd are
+          # inferred; libpam0g-dev likewise: Cargo.lock has no pam crate, but upstream Linux CI
+          # always installed it and one extra package is cheaper than being surprised.
+          apt_install libevdev-dev libxdo-dev libudev-dev libsystemd-dev libpam0g-dev
+
+          # Codecs: the system-libs feature links the distro copies of libvpx/libaom/libyuv/opus.
+          # libx264/libx265 are kept for the optional hardware-codec path; libvulkan-dev is
+          # inferred (no vulkan crate in the tree) and kept for future use.
+          apt_install libvpx-dev libaom-dev libyuv-dev libx264-dev libx265-dev libopus-dev libvulkan-dev
+
+          pkg-config --version
+          # If any of these .pc files is missing, the build ends in a "failed to run custom build
+          # command" 30 minutes later, so fail right here and name the package.
+          # The existence test has to be its own command: a failing command substitution inside
+          # printf's arguments does not trip `set -e`, so the version probe alone would print an
+          # empty column and let the build fail 30 minutes later.
+          for pc in gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 dbus-1 wayland-client \
+                    gtk+-3.0 libdrm vpx aom opus; do
+            if ! version="$(pkg-config --modversion "$pc")"; then
+              echo "::error::$pc.pc is missing: install the -dev package that provides it"
+              exit 1
+            fi
+            printf '%-22s %s\n' "$pc" "$version"
+          done
+          # gdk-x11-3.0 comes from libgtk-3-dev; if it ever disappears gdkx11-sys degrades
+          # instead of failing, so only warn.
+          pkg-config --exists gdk-x11-3.0 && echo "gdk-x11-3.0 ok" \
+            || echo "::warning::gdk-x11-3.0.pc missing (gdkx11-sys will build without the x11 backend)"
+
+      # scrap/build.rs and magnum-opus/build.rs have only one path on Linux now: with
+      # "--features system-libs" they use pkg-config. That needs four .pc files: vpx / aom / opus /
+      # libyuv. Ubuntu provides the first three (libvpx-dev, libaom-dev, libopus-dev), but its
+      # libyuv-dev ships only libyuv.h + libyuv.a/.so and no libyuv.pc (verified against the noble
+      # deb file list), so write a minimal one. Only when pkg-config cannot find libyuv, so a
+      # distro-provided .pc in the future is never overwritten.
+      - name: Provide libyuv pkg-config metadata (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          if pkg-config --exists libyuv; then
+            echo "libyuv.pc already provided (version $(pkg-config --modversion libyuv))"
+            exit 0
+          fi
+          if [ ! -f /usr/include/libyuv.h ]; then
+            echo "::error::/usr/include/libyuv.h is missing: libyuv-dev was not installed by the step above"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/pkgconfig"
+          cat > "$RUNNER_TEMP/pkgconfig/libyuv.pc" <<'EOF'
+          Name: libyuv
+          Description: YUV conversion/scaling library (distro package ships no .pc file)
+          Version: 0.0
+          Libs: -lyuv
+          Cflags: -I/usr/include
+          EOF
+          pc_path="$RUNNER_TEMP/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          echo "PKG_CONFIG_PATH=$pc_path" >> "$GITHUB_ENV"
+          PKG_CONFIG_PATH="$pc_path" pkg-config --cflags --libs libyuv
+
+      # ---- Windows toolchain ---------------------------------------------------------------
+      # UCRT64 is the current Microsoft-ABI runtime and the one this tree builds against. The
+      # packages below provide the system libraries that scrap/magnum-opus look up through
+      # pkg-config, plus libclang for bindgen, cmake/nasm for the remaining -sys crates.
+      - name: Set up MSYS2 UCRT64 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          # Keep the runner's Windows PATH inside the MSYS2 shell: rustup/cargo and Git for Windows
+          # live outside MSYS2, and cargo needs git for the git dependencies.
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libvpx
+            mingw-w64-ucrt-x86_64-aom
+            mingw-w64-ucrt-x86_64-libyuv
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-nasm
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-clang
+
+      # The MSVC toolchain is the Windows runner default; host/ needs the GNU target so that
+      # gcc/MSYS2 can link the UCRT64 libraries.
+      - name: Set up Rust GNU toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal --no-self-update
+          rustup default stable-x86_64-pc-windows-gnu
+          rustc --version
+          cargo --version
+
+      - name: Set up Rust (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      # Cache both the registry and the build directory. The key carries the Cargo.lock hash so a
+      # dependency change starts a new entry; platform/arch keeps the three jobs from sharing a
+      # target dir built for a different target. restore-keys gives a warm near-miss instead.
+      - name: Cache cargo registry and host target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            host/target
+          key: cargo-host-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('host/Cargo.lock') }}
+          restore-keys: |
+            cargo-host-${{ matrix.platform }}-${{ matrix.arch }}-
+
+      - name: Build host (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs
+          # --features system-libs: scrap and magnum-opus stop looking for VCPKG_ROOT and use
+          # pkg-config against the libvpx/libaom/libyuv/libopus packages installed above.
+          # No --locked on purpose: host/Cargo.lock is being updated by the parallel host work and
+          # a stale lock must not fail the build. 2>&1 | tee keeps the full cargo/build.rs/pkg-config
+          # output for the failure artifact.
+          # --config: this step runs at the repo root, so host/.cargo/config.toml (libwebm's
+          # CXXFLAGS, see the note at the top of this file) has to be named explicitly.
+          cargo build --release --manifest-path host/Cargo.toml --features system-libs \
+            --config host/.cargo/config.toml 2>&1 \
+            | tee build-logs/cargo.log
+
+      - name: Build host (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs
+          # gcc/MSYS2 crash (0xc0000409) when TMP/TEMP points outside the workspace, so keep
+          # compiler temporaries in host/target/tmp as README.md asks for local builds.
+          export TMP="$(cygpath -m "$GITHUB_WORKSPACE/host/target/tmp")"
+          export TEMP="$TMP"
+          mkdir -p "$TMP"
+          # rustup's shims live outside MSYS2; "path-type: inherit" should put them on PATH, but
+          # make it explicit so the step does not depend on how the action builds PATH.
+          if ! command -v cargo >/dev/null 2>&1; then
+            export PATH="/c/Users/$USER/.cargo/bin:$PATH"
+          fi
+          # MSYS2 root is C:/msys64; native programs (pkgconf, bindgen/libloading) need Windows
+          # paths, so convert. -m gives C:/msys64/ucrt64/... which both worlds accept.
+          mingw_prefix="${MINGW_PREFIX:-/ucrt64}"
+          # Keep whatever PKG_CONFIG_PATH the runner already had after ours (native pkgconf on
+          # Windows splits on ';', not ':').
+          export PKG_CONFIG_PATH="$(cygpath -m "$mingw_prefix/lib/pkgconfig")${PKG_CONFIG_PATH:+;$PKG_CONFIG_PATH}"
+          export LIBCLANG_PATH="$(cygpath -m "$mingw_prefix/bin")"
+          export CC=gcc CXX=g++
+          command -v cargo
+          cargo --version
+          gcc --version | head -n 1
+          # Same as the Linux probe: the existence test must be its own command, otherwise the
+          # empty column from a missing .pc is not an error.
+          for pc in vpx aom libyuv opus; do
+            if ! version="$(pkg-config --modversion "$pc")"; then
+              echo "::error::$pc.pc is missing: install mingw-w64-ucrt-x86_64-$pc"
+              exit 1
+            fi
+            printf '%-8s %s\n' "$pc" "$version"
+          done
+          # --config: this step runs at the repo root, so host/.cargo/config.toml (libwebm's
+          # CXXFLAGS, see the note at the top of this file) has to be named explicitly.
+          cargo build --release --manifest-path host/Cargo.toml --features system-libs \
+            --config host/.cargo/config.toml 2>&1 \
+            | tee build-logs/cargo.log
+
+      - name: Check binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs
+          bin=host/target/release/rustdesk
+          if [ ! -f "$bin" ]; then
+            echo "::error::cargo reported success but $bin is missing"
+            ls -l host/target/release/ || true
+            exit 1
+          fi
+          ls -l "$bin"
+          file "$bin"
+          # A missing shared library shows up at link time; dlopened ones only at runtime.
+          ldd "$bin" | tee build-logs/ldd.log || true
+
+      - name: Check binary (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs
+          bin=host/target/release/rustdesk.exe
+          if [ ! -f "$bin" ]; then
+            echo "::error::cargo reported success but $bin is missing"
+            ls -l host/target/release/ || true
+            exit 1
+          fi
+          ls -l "$bin"
+          # Imported DLLs are the Windows equivalent of ldd; best effort, objdump may be absent.
+          objdump -p "$bin" 2>/dev/null | grep 'DLL Name' | tee build-logs/imports.log || true
+
+      # A Windows artifact that is only the .exe cannot run anywhere: the binary imports libvpx,
+      # libaom, libyuv, libopus, libstdc++, libgcc, libwinpthread and libjpeg from MSYS2's ucrt64.
+      # Collect the import closure (transitively) next to the executable so the artifact is usable
+      # on a machine without MSYS2.
+      - name: Stage runnable directory (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          bin=host/target/release/rustdesk.exe
+          dist=host/target/release/dist
+          rm -rf "$dist"
+          mkdir -p "$dist"
+          cp "$bin" "$dist/"
+          queue=("$bin")
+          declare -A seen=()
+          while [ "${#queue[@]}" -gt 0 ]; do
+            current="${queue[0]}"
+            queue=("${queue[@]:1}")
+            while read -r dll; do
+              [ -z "$dll" ] && continue
+              [ -n "${seen[$dll]:-}" ] && continue
+              seen[$dll]=1
+              if [ -f "$MINGW_PREFIX/bin/$dll" ]; then
+                cp "$MINGW_PREFIX/bin/$dll" "$dist/"
+                queue+=("$MINGW_PREFIX/bin/$dll")
+              fi
+            done < <(objdump -p "$current" 2>/dev/null | awk '/DLL Name/ {print $3}')
+          done
+          ls -l "$dist"
+          du -sh "$dist"
+
+      - name: Upload binary (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: host/target/release/rustdesk
+          if-no-files-found: error
+
+      - name: Upload runnable directory (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: host/target/release/dist/*
+          if-no-files-found: error
+
+      # The most common failure is a -sys build.rs, and cargo's log is folded/truncated in the web
+      # view; upload the full log (paths stay inside the workspace: upload-artifact v4 only accepts
+      # workspace paths).
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-failure-logs-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            build-logs/**
+            host/target/release/build/**/output
+            host/target/release/build/**/stderr
+          if-no-files-found: ignore
+          retention-days: 7

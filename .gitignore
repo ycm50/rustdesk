@@ -1,0 +1,62 @@
+/build
+/target
+.vscode
+.idea
+.DS_Store
+.env
+extractor
+__pycache__
+src/version.rs
+*dmg
+*exe
+*tgz
+cert.pfx
+*.bak
+*png
+*svg
+*jpg
+**pdb
+*deb
+/rustdesk
+*.cache
+# appimage
+appimage/AppDir
+appimage/*.AppImage
+appimage/appimage-build
+appimage/*.xz
+# flatpak
+flatpak/.flatpak-builder/**
+flatpak/ccache/**
+flatpak/.flatpak-builder/build/**
+flatpak/.flatpak-builder/shared-modules/**
+flatpak/.flatpak-builder/shared-modules/*.tar.xz
+flatpak/.flatpak-builder/debian-binary
+flatpak/build/**
+flatpak/repo/**
+flatpak/*.flatpak
+# vscode devcontainer
+.gitconfig
+.vscode-server/
+.ssh
+.devcontainer/.*
+# build cache in examples
+examples/**/target/
+# libdrmtap is cloned at build time by build.py (not a submodule)
+/third_party/libdrmtap/
+# Local git worktrees
+.worktrees/
+build-logs/
+tmpscripts/
+host/target/
+
+# Local build scratch: MSYS2 needs a writable TMP inside the workspace (gcc aborts with
+# 0xc0000409 when TEMP points at a profile directory it cannot write), prebuilt FFmpeg is
+# downloaded per platform/arch here, and cargo check logs are kept for inspection.
+.tmpbuild/
+host/*.log
+host/.deps/
+
+# The rules above ignore image files everywhere; the Android client needs real icons, so
+# re-include the resource tree. Negations must come after the patterns they override.
+!android/app/src/main/res/**/*.png
+!android/app/src/main/res/**/*.jpg

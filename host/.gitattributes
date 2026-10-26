@@ -1,0 +1,3 @@
+# entrypoint.sh runs as the container's /bin/sh: a CRLF shebang fails with "bad interpreter".
+# Keep shell scripts LF in the working tree regardless of core.autocrlf.
+*.sh text eol=lf

@@ -1,0 +1,59 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.rustdesk.java'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.rustdesk.java"
+        minSdk 24
+        targetSdk 36
+        versionCode 1
+        versionName "0.1"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // Deliberately committed, shared test key: the release APK only has to be installable and
+    // updatable in place, and a public keystore keeps CI reproducible without secrets. Do not
+    // ship anything signed with it.
+    signingConfigs {
+        shared {
+            storeFile file('../keystore/test.keystore')
+            storePassword '123456'
+            keyAlias 'key0'
+            keyPassword '123456'
+        }
+    }
+
+    buildTypes {
+        debug { }
+        release {
+            // Minification stays off, but the rules are wired in so that turning it on cannot
+            // silently drop the class HostAgent loads by name (see proguard-rules.pro).
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.shared
+        }
+    }
+
+    packaging {
+        resources.excludes += [
+            'META-INF/DEPENDENCIES',
+            'META-INF/LICENSE*',
+            'META-INF/NOTICE*',
+            'META-INF/versions/**',
+            'META-INF/*.kotlin_module'
+        ]
+    }
+}
+
+dependencies {
+    implementation 'com.google.protobuf:protobuf-javalite:3.20.1'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.79'
+}
+
