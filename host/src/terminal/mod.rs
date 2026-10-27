@@ -43,7 +43,27 @@ Environment:
   RUSTDESK_CONFIG_DIR=<path>        Keep configuration outside the data/ folder
 ";
 
-pub fn run(args: &mut [String]) -> i32 {
+pub fn run(args: &mut Vec<String>) -> i32 {
+    // Only an argument-less launch reaches here with a server thread already running, because
+    // core_main starts it before dispatching. Read that before --relay-bridge is taken out,
+    // otherwise "rustdesk --relay-bridge <url>" would look argument-less afterwards and no
+    // server would ever be started.
+    let server_started = args.is_empty();
+    // A tray launch hides the console before anything can print to it; the decision is taken
+    // here, while --relay-bridge is still in the argument list.
+    #[cfg(windows)]
+    let tray_mode = is_tray_launch(args);
+    #[cfg(windows)]
+    if tray_mode {
+        crate::tray::console::detach();
+    }
+    // --relay-bridge is a modifier, not a subcommand: it has to be pulled out before the
+    // first-argument dispatch so that --headless --relay-bridge <url> works.
+    let relay_requested = take_relay_bridge(args);
+    if relay_requested == RelayRequest::Invalid {
+        return 2;
+    }
+
     if let Some(first) = args.first() {
         match first.as_str() {
             "-h" | "--help" => {
@@ -133,10 +153,9 @@ pub fn run(args: &mut [String]) -> i32 {
                     return 0;
                 }
             }
-            // No tray exists in this build; it is reached from `core_main()` on
-            // autostart runs, so accept it quietly instead of failing.
-            "--tray" => {}
-            "--headless" | "-v" | "--verbose" => {}
+            // Reached from `core_main()` on autostart runs; the dispatch below sends it to
+            // the tray, exactly like an argument-less launch.
+            "--tray" | "--headless" | "-v" | "--verbose" => {}
             other => {
                 eprintln!("Unknown argument: {other}");
                 eprint!("{USAGE}");
@@ -145,7 +164,75 @@ pub fn run(args: &mut [String]) -> i32 {
         }
     }
     let verbose = args.iter().any(|arg| arg == "-v" || arg == "--verbose");
+
+    // An argument-less run is the desktop case: keep the host in the notification area
+    // instead of tying it to a console window the operator has to leave open.
+    #[cfg(windows)]
+    if tray_mode {
+        return crate::tray::run(server_started);
+    }
     // `core_main()` already spawned the server thread for an argument-less run;
     // an explicit `--headless` reaches this point without one.
-    status::run_host(args.is_empty(), verbose)
+    status::run_host(server_started, verbose)
+}
+
+/// Whether this launch belongs in the notification area rather than a console.
+///
+/// Mirrors the dispatch below: no `--headless`, and either no subcommand at all or one of the
+/// forms that mean "run the host" (`--tray`, `--relay-bridge`, a bare verbosity flag).
+#[cfg(windows)]
+fn is_tray_launch(args: &[String]) -> bool {
+    if args.iter().any(|arg| arg == "--headless") {
+        return false;
+    }
+    matches!(
+        args.first().map(String::as_str),
+        None | Some("--tray") | Some("--relay-bridge") | Some("-v") | Some("--verbose")
+    )
+}
+
+/// What a `--relay-bridge` argument turned into.
+#[derive(PartialEq, Eq)]
+enum RelayRequest {
+    Absent,
+    Started,
+    Invalid,
+}
+
+/// Starts the bridge when asked and removes its arguments, so the rest of the dispatch never
+/// sees them. Returns whether the flag was present and whether it started.
+fn take_relay_bridge(args: &mut Vec<String>) -> RelayRequest {
+    let Some(position) = args.iter().position(|arg| arg == "--relay-bridge") else {
+        return RelayRequest::Absent;
+    };
+    let Some(url) = args.get(position + 1).cloned() else {
+        eprintln!("--relay-bridge needs the Worker URL");
+        return RelayRequest::Invalid;
+    };
+    // An optional port follows; a non-numeric value there is left for the dispatcher so that
+    // `--relay-bridge <url> --verbose` keeps working.
+    let mut taken = 2;
+    let mut peer_port = None;
+    if let Some(value) = args.get(position + 2) {
+        match value.parse::<u16>() {
+            Ok(port) => {
+                peer_port = Some(port);
+                taken = 3;
+            }
+            Err(_) if value.starts_with("--") => {}
+            Err(_) => {
+                eprintln!("--relay-bridge <url> [peer-port]");
+                return RelayRequest::Invalid;
+            }
+        }
+    }
+    match crate::relay_bridge::start(&url, peer_port) {
+        Ok(where_to) => eprintln!("Relay bridge running: {where_to}"),
+        Err(err) => {
+            eprintln!("{err:#}");
+            return RelayRequest::Invalid;
+        }
+    }
+    args.drain(position..position + taken);
+    RelayRequest::Started
 }

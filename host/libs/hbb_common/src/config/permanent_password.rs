@@ -43,6 +43,16 @@ pub(super) fn encode_permanent_password_storage_from_h1(
     PERMANENT_PASSWORD_HASH_PREFIX.to_owned() + &base64::encode(h1, base64::Variant::Original)
 }
 
+/// Storage this host would persist for `password` under `salt`.
+///
+/// Exposed for callers that keep the plain password outside the config (the headless host keeps
+/// a copy on disk so a running process can re-check a peer against the current file).
+pub fn permanent_password_storage_from_plain(password: &str, salt: &str) -> Option<String> {
+    encode_permanent_password_encrypted_storage_from_h1(&compute_permanent_password_h1(
+        password, salt,
+    ))
+}
+
 pub(super) fn encode_permanent_password_encrypted_storage_from_h1(
     h1: &[u8; PERMANENT_PASSWORD_H1_LEN],
 ) -> Option<String> {

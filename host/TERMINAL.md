@@ -1,10 +1,12 @@
 # RustDesk 1.5.1 Windows 纯终端版使用说明
 
-这是 RustDesk 1.5.1 的 Windows 纯终端版本：不包含图形界面和系统托盘。所有操作都在 Windows Terminal、PowerShell 或 cmd 中完成。
+这是 RustDesk 1.5.1 的 Windows 纯终端版本：没有图形界面，只有无头终端，外加一个系统托盘（见第五节）。不带参数启动时进程驻留通知区域；带 \`--headless\` 则留在控制台里。
 
 支持的主要功能：
 
-- 无头被控端：显示设备 ID、临时密码和固定密码状态；
+- 无头被控端：显示设备 ID 与固定密码本身（没有固定密码时才显示临时密码）；
+- 系统托盘：不带参数启动时驻留通知区域，菜单可看 ID / 密码 / 中继服务器，并能重启或退出；
+- 中继桥接：\`--relay-bridge <url>\` 按需加载 \`relay_bridge.dll\`，把直连端口搬到 Cloudflare Worker 上；
 - 远程终端：连接后操作远端 PowerShell/cmd；
 - 文件传输：列目录、下载和上传；
 - 端口转发；
@@ -94,13 +96,12 @@ rustdesk-terminal\data\log\
 ```text
 RustDesk 1.5.1 终端被控端
   设备 ID    : 371956946
-  固定密码   : 已设置（用 `rustdesk --password <密码>` 修改）
-  临时密码   : jsdxjk（每次启动随机生成，可选）
+  固定密码   : yourpass（用 `rustdesk --password <密码>` 修改）
   中继服务器 : rs-ny.rustdesk.com:21116
   日志目录   : <程序目录>\data\log
 ```
 
-按 `Ctrl+C` 停止被控端。当前版本没有托盘图标，关闭终端窗口也会停止进程。
+有固定密码时不再显示临时密码。按 `Ctrl+C` 停止被控端；不带 `--headless` 启动则驻留托盘，见第五节。
 
 ### 两个密码的区别
 
@@ -117,9 +118,25 @@ RustDesk 1.5.1 终端被控端
 .\rustdesk.exe --password 你的固定密码
 ```
 
-成功后输出 `Done!`。之后再启动被控端，横幅会显示 `固定密码 : 已设置`。
+成功后输出 `Done!`，并往两处写：
 
-固定密码会保存在程序目录下的配置中。配置目录属于敏感目录，请不要公开或上传其中的文件。
+| 文件 | 内容 | 用途 |
+|---|---|---|
+| `data\config\RustDesk.toml` 的 `password` | 加盐后的单向校验值 | 登录校验用 |
+| `data\config\permanent-password.txt` | **明文密码** | 横幅/托盘显示用 |
+
+两点必须知道：
+
+1. **不经过 IPC**：不需要已有实例在运行，直接写文件。
+2. **校验以明文文件为准**：每次有客户端登录都会重新读 `permanent-password.txt`，所以运行中改密码后**旧密码立刻失效**，无需重启；只有横幅里显示的文本要重启才更新。
+
+> ⚠️ `permanent-password.txt` 是明文。配置文件与它都属于敏感文件，不要公开或上传。
+
+Python 环境里手工确认明文文件：
+
+```powershell
+Get-Content .\data\config\permanent-password.txt
+```
 
 验证固定密码是否生效，可以自己连自己：
 
@@ -172,7 +189,44 @@ $env:RUSTDESK_TERM_256 = '1'
 
 不同 DPI、窗口缩放、全屏和失焦场景可能产生坐标偏差，建议实际使用时确认。
 
-## 四、远程终端
+## 四、托盘后台运行（不带 --headless）
+
+直接双击或运行 `rustdesk.exe`（不带任何参数）时，进程驻留**系统托盘**，不占控制台：
+
+- **完全不创建终端窗口**：程序在 Windows 上编译为 GUI 子系统（`windows_subsystem = "windows"`），
+  双击时系统**不会**为它创建控制台；从 cmd/PowerShell 启动时，`platform::attach_parent_console()`
+  会把输出挂到那个已有窗口里（没有父控制台就什么也不做）；
+- 进入托盘路径后还会把 stdout/stderr 指向 NUL 并 `FreeConsole()`，所以托盘模式下不打横幅、
+  不刷日志，屏幕上只剩任务栏图标；
+- 左键单击图标 / 右键 → 弹出菜单；
+- 菜单前三行是实时状态，每次打开菜单都重新读取：
+  - `ID: <设备ID>`
+  - `密码: <当前生效的固定密码>`（没有固定密码时显示“未设置”）
+  - `中继: <rendezvous 服务器>（relay: <relay-server 或 未设置>）`
+- `重启`：以相同参数重新拉起进程后退出当前进程；
+- `退出`：停止被控端并移除图标。
+
+需要留在控制台看日志时用 `--headless`，两者是同一个被控端，区别只在“有没有终端界面”。
+托盘模式下所有输出仍完整写入 `data\log\`，只是不再回显到屏幕。
+
+### 中继桥接（--relay-bridge）
+
+把本机直连端口（默认 21118）搬到 Cloudflare Worker 上，被控端**不需要任何入站端口**：
+
+```powershell
+# 与控制台模式一起跑
+.\rustdesk.exe --headless --relay-bridge "wss://rdworker.5704524.xyz/bridge?key=你的KEY"
+
+# 或与托盘一起跑（推荐长期使用）
+.\rustdesk.exe --relay-bridge "wss://rdworker.5704524.xyz/bridge?key=你的KEY" 21118
+```
+
+- `--relay-bridge <url> [本地端口]`；端口省略时用 21118。
+- 桥接实现放在 **`relay_bridge.dll`**，只有带这个参数时才会被加载（`LoadLibrary`），不用中继的部署完全不会把它映射进内存。
+- `relay_bridge.dll` 必须和 `rustdesk.exe` 放在同一目录，缺失时该参数会直接报错退出（退出码 2）。
+- 手机端 ID 填 `wss://rdworker.5704524.xyz`。
+
+## 五、远程终端
 
 ```powershell
 .\rustdesk.exe --terminal <设备ID> <密码>
@@ -186,7 +240,7 @@ $env:RUSTDESK_TERM_256 = '1'
 'echo hello' | .\rustdesk.exe --terminal <设备ID> <密码>
 ```
 
-## 五、文件传输
+## 六、文件传输
 
 ### 列出远端目录
 
@@ -228,7 +282,7 @@ $env:RUSTDESK_TERM_256 = '1'
 
 已验证空文件、二进制文件、中文文件名和包含空格的文件名上传。
 
-## 六、端口转发
+## 七、端口转发
 
 ```powershell
 .\rustdesk.exe --port-forward <设备ID> <密码> <本地端口> <远端主机> <远端端口>
@@ -242,7 +296,7 @@ $env:RUSTDESK_TERM_256 = '1'
 
 之后访问本机 `127.0.0.1:18081`，流量会转发到远端 `127.0.0.1:18080`。
 
-## 七、配置、日志和环境变量
+## 八、配置、日志和环境变量
 
 默认配置和日志都放在程序目录：
 
@@ -267,7 +321,7 @@ $env:RUSTDESK_CONFIG_DIR = 'D:\RustDeskData'
 $env:RUSTDESK_TERM_256 = '1'
 ```
 
-## 八、从源码构建（Windows / MSYS2 UCRT64）
+## 九、从源码构建（Windows / MSYS2 UCRT64）
 
 `host/` 用 MSYS2 UCRT64 工具链构建，不使用 MSVC，也不使用 vcpkg：libvpx、libaom、libyuv、libopus 都来自 UCRT64 系统包，通过 pkg-config 链接（feature `system-libs`）。
 
@@ -329,7 +383,7 @@ host\scripts\fetch-ffmpeg.ps1
 
 它按平台/架构下载 BtbN/FFmpeg-Builds 的开源预构建件，不本地编译，也不用 vcpkg。脚本的下载地址与放置目录以脚本自身为准（本次未运行，待验证）。
 
-## 九、安全和生命周期
+## 十、安全和生命周期
 
 - Release 程序未签名，首次运行可能触发 Windows SmartScreen 提示；
 - 固定密码保存在配置文件中，请保护 `data\config`；
@@ -339,7 +393,7 @@ host\scripts\fetch-ffmpeg.ps1
 - 断线后当前版本不会自动重连；
 - 远程光标目前不绘制，终端光标在画面模式下隐藏。
 
-## 十、常见问题
+## 十一、常见问题
 
 ### 手机或另一台电脑能看画面，但点不动、打不了字
 
@@ -373,7 +427,7 @@ Windows 截屏（DXGI）默认不包含鼠标指针，指针由客户端自己�
 
 连接时用固定密码即可。
 
-## 十一、已知限制
+## 十二、已知限制
 
 - 画面帧率取决于画面内容、CPU 和终端尺寸，没有固定值；
 - 当前一次显示一个远端画面，没有显示器切换器；

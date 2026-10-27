@@ -1,0 +1,29 @@
+name = "rustdesk-relay"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Keep the account-scoped name as well as the custom domain: a carrier that interferes with one
+# hostname often leaves the other alone, so the viewer has a fallback without a redeploy.
+workers_dev = true
+
+# One Durable Object instance per session key: it owns the pair of sockets and does the
+# byte forwarding, so no message ever has to leave Cloudflare for the two peers to meet.
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "RelaySession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelaySession"]
+
+# Custom domain: wrangler creates the DNS record and the certificate, so the viewer and the
+# bridge both use a stable name instead of the account-scoped workers.dev one.
+[[routes]]
+pattern = "rdworker.5704524.xyz"
+custom_domain = true
+
+
+[vars]
+# Shared secret: the bridge passes it as ?key=, the viewer inherits it when it omits one.
+# Replace it before deploying; leaving the placeholder means anyone can claim the relay.
+BRIDGE_KEY = "change-me"

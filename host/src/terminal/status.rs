@@ -78,8 +78,8 @@ fn out(text: &str) {
 
 fn print_banner(live_log: bool) {
     // The permanent password is the one the operator chose; the temporary one is
-    // regenerated on every start and is only an alternative, so they must not be
-    // printed as if they were the same thing.
+    // regenerated on every start and is only an alternative, so while a fixed one is in
+    // force only that one is printed.
     let has_fixed = Config::has_permanent_password();
     let mut text = format!(
         "\nRustDesk {} 终端被控端\n  设备 ID    : {}\n",
@@ -87,10 +87,9 @@ fn print_banner(live_log: bool) {
         Config::get_id()
     );
     if has_fixed {
-        text.push_str("  固定密码   : 已设置（用 `rustdesk --password <密码>` 修改）\n");
         text.push_str(&format!(
-            "  临时密码   : {}（每次启动随机生成，可选）\n",
-            current_temporary_password()
+            "  固定密码   : {}（用 `rustdesk --password <密码>` 修改）\n",
+            crate::password_file::banner_text()
         ));
     } else {
         text.push_str("  固定密码   : 未设置（建议执行 `rustdesk --password <密码>`）\n");

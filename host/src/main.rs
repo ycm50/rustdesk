@@ -1,3 +1,8 @@
+// A GUI-subsystem binary is started without a console, so a double-click never opens a terminal
+// window. The command-line paths borrow the launching shell's console in
+// `platform::attach_parent_console()`; see `host/TERMINAL.md`.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use librustdesk::*;
 
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
@@ -13,6 +18,9 @@ fn main() {
 
 #[cfg(not(any(target_os = "android", target_os = "ios", feature = "flutter")))]
 fn main() -> std::process::ExitCode {
+    // First, before anything can print: this build has no console of its own.
+    #[cfg(windows)]
+    platform::attach_parent_console();
     #[cfg(windows)]
     if let Some(exit_code) = platform::handle_service_control() {
         return exit_code;

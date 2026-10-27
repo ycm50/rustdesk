@@ -24,7 +24,8 @@ mod permanent_password;
 pub use permanent_password::{
     compute_permanent_password_h1, decode_permanent_password_h1_from_storage,
     decode_preset_password_h1_from_storage, local_permanent_password_storage_is_usable_for_auth,
-    preset_permanent_password_storage_is_usable_for_auth, ENCRYPT_MAX_LEN,
+    permanent_password_storage_from_plain, preset_permanent_password_storage_is_usable_for_auth,
+    ENCRYPT_MAX_LEN,
 };
 use permanent_password::{
     decode_permanent_password_h1_from_hashed_storage, decrypt_permanent_password_str_or_original,

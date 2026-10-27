@@ -3972,6 +3972,57 @@ fn native_after_install_commands(
     ))
 }
 
+const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetStdHandle(n_std_handle: u32) -> isize;
+    fn SetStdHandle(n_std_handle: u32, handle: isize) -> i32;
+    fn AttachConsole(process_id: u32) -> i32;
+}
+
+/// Points stdout/stderr at the console that started this process, if there is one.
+///
+/// The binary is built as a GUI-subsystem program so that a double-click never opens a terminal
+/// window. Command-line use still needs its output, so when the launching shell left us no usable
+/// standard handle we borrow its console; with no parent console this does nothing and the
+/// process stays silent, which is exactly what a tray launch wants.
+pub fn attach_parent_console() {
+    use std::os::windows::io::AsRawHandle;
+
+    // 0 is a null handle and -1 is INVALID_HANDLE_VALUE: both mean "no console and no redirect".
+    let usable = |handle: isize| handle != 0 && handle != -1;
+    unsafe {
+        if usable(GetStdHandle(STD_OUTPUT_HANDLE)) || usable(GetStdHandle(STD_ERROR_HANDLE)) {
+            // A pipe or a file redirect arrives as a real handle and must be left alone.
+            return;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        for which in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let console = std::fs::OpenOptions::new()
+                .write(true)
+                .open("CONOUT$")
+                .or_else(|_| {
+                    // Some consoles only hand out a readable handle; write-only is enough to
+                    // print, but the open is retried the wider way rather than losing output.
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open("CONOUT$")
+                });
+            if let Ok(file) = console {
+                SetStdHandle(which, file.as_raw_handle() as isize);
+                // The handle has to outlive this call; the process keeps using it.
+                std::mem::forget(file);
+            }
+        }
+    }
+}
+
 #[cfg(not(feature = "flutter"))]
 pub fn handle_service_control() -> Option<std::process::ExitCode> {
     if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--service-control")) {

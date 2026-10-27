@@ -4,6 +4,7 @@
 
 * `android/` —— 纯 Java 安卓客户端（主控端 + 被控端）。没有 Flutter/Dart、Rust `.so`、NDK 或 vcpkg；构建走 Gradle。
 * `host/` —— 被控端，保留上游 Rust 源码。没有 Flutter/Dart UI，不使用 vcpkg；只有无头终端（入口在 `host/src/terminal/`，使用说明见 `host/TERMINAL.md`）。
+* `worker/` —— 可选的中继：Cloudflare Worker + Durable Object 转发 WSS 二进制帧，配一个跑在被控端机器上的出站桥接（`worker/bridge`，独立 Rust crate）。它不参与上面两者的构建。
 
 几条适用于全仓库的构建约定：
 
@@ -28,6 +29,7 @@
 * `host/libs/magnum-opus/` vendored opus wrapper（path 依赖；`system-libs` 下走 pkg-config）
 * `host/libs/base/src/config/keys.rs` the single import path for all options
 * `android/` pure Java Android client（Gradle project; 没有 `host/` 的 Cargo workspace 成员关系）
+* `worker/` Cloudflare Worker 中继（`src/`）+ 被控端出站桥接（`bridge/`）；用法见 `worker/README.md`
 
 ### Key Components
 - **Remote Desktop Protocol**: Custom protocol implemented in `host/src/rendezvous_mediator.rs` for communicating with rustdesk-server
@@ -35,13 +37,15 @@
 - **Input Handling**: Cross-platform input simulation in `host/libs/enigo/`
 - **Audio/Video Services**: Real-time audio/video streaming in `host/src/server/`
 - **File Transfer**: Secure file transfer implementation in `host/libs/base/src/fs.rs`
-- **Headless Terminal**: 被控端通过 `host/src/terminal/` 的 `--headless` 入口运行（跨平台），不启动 GUI；连接端的 `--connect` / `--terminal` / `--file-transfer` / `--port-forward` 目前仅 Windows 实现，非 Windows 只打印 `only implemented on Windows in this build` 并以退出码 2 结束
+- **Headless Terminal**: 被控端通过 `host/src/terminal/` 的 `--headless` 入口运行（跨平台），不启动 GUI；不带参数则在 Windows 上转由 `host/src/tray/` 驻留通知区域；`--relay-bridge <url>` 按需加载 `relay_bridge.dll` 做 WSS 中继；连接端的 `--connect` / `--terminal` / `--file-transfer` / `--port-forward` 目前仅 Windows 实现，非 Windows 只打印 `only implemented on Windows in this build` 并以退出码 2 结束
 
 `hbb_common` 是本仓库的普通 workspace member（目录随仓库提交），可以直接改；它不再是从外部拉取的 submodule。`base::config::keys` re-exports the handful of keys `hbb_common` still reads, so callers get the whole set from that one path.
 
 ### No UI
 
-`host/` 构建不再产出图形界面：Dart/UI 树已删除，也没有系统托盘或 Sciter 界面。Rust 侧仍残留 `#[cfg(feature = "flutter")]` 门控的死代码（feature 已不再声明），历史 flutter 条件编译分支正在清理；`build.rs` 里的 `RUSTDESK_SCITER` 宏名虽带 Sciter 字样，守护的其实是 `--service-control` 的服务安装/卸载代码（`platform/windows.cc`），不要当 UI 残留删除。用户交互全部走终端（`host/TERMINAL.md`）。不要在 `host/` 里引入会拉起窗口、WebView 或 Flutter engine 的代码路径。
+Dart/UI 树已删除。**唯一**的 GUI 是在 `host/src/tray/` 里的 Windows 系统托盘（纯 Win32 `Shell_NotifyIconW`，不带参数启动时驻留，菜单显示 ID / 密码 / 中继并支持重启、退出）；其余交互仍走终端（`host/TERMINAL.md`）。
+
+Rust 侧仍残留 `#[cfg(feature = "flutter")]` 门控的死代码（feature 已不再声明），历史 flutter 条件编译分支正在清理；`build.rs` 里的 `RUSTDESK_SCITER` 宏名虽带 Sciter 字样，守护的其实是 `--service-control` 的服务安装/卸载代码（`platform/windows.cc`），不要当 UI 残留删除。不要在 `host/` 里引入 WebView、Flutter engine、或除托盘之外的窗口系统代码。
 
 ## Rust Rules
 

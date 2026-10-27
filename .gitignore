@@ -55,6 +55,9 @@ host/target/
 .tmpbuild/
 host/*.log
 host/.deps/
+worker/bridge/target/
+worker/node_modules/
+worker/.wrangler/
 
 # The rules above ignore image files everywhere; the Android client needs real icons, so
 # re-include the resource tree. Negations must come after the patterns they override.

@@ -552,6 +552,22 @@ jobs:
             --config host/.cargo/config.toml 2>&1 \
             | tee build-logs/cargo.log
 
+      # The relay bridge is a separate crate outside host/'s workspace, so it needs its own
+      # build. It ships beside the binary as a cdylib: the host dlopens it only when
+      # --relay-bridge is passed.
+      - name: Build relay bridge (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cargo build --release --manifest-path worker/bridge/Cargo.toml 2>&1 \
+            | tee build-logs/bridge.log
+          dist=host/target/release/dist
+          rm -rf "$dist"
+          mkdir -p "$dist"
+          cp host/target/release/rustdesk "$dist/"
+          cp worker/bridge/target/release/librelay_bridge.so "$dist/"
+          ls -l "$dist"
+
       - name: Check binary (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -567,6 +583,24 @@ jobs:
           file "$bin"
           # A missing shared library shows up at link time; dlopened ones only at runtime.
           ldd "$bin" | tee build-logs/ldd.log || true
+
+      - name: Build relay bridge (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          export TMP="$(cygpath -m "$GITHUB_WORKSPACE/host/target/tmp")"
+          export TEMP="$TMP"
+          mkdir -p "$TMP"
+          export CC=gcc CXX=g++
+          # rustup's shims live outside MSYS2; the host step makes PATH explicit for the same
+          # reason, and each step starts a fresh shell.
+          if ! command -v cargo >/dev/null 2>&1; then
+            export PATH="/c/Users/$USER/.cargo/bin:$PATH"
+          fi
+          cargo build --release --manifest-path worker/bridge/Cargo.toml 2>&1 \
+            | tee build-logs/bridge.log
+          ls -l worker/bridge/target/release/relay_bridge.dll
 
       - name: Check binary (Windows)
         if: runner.os == 'Windows'
@@ -598,7 +632,8 @@ jobs:
           rm -rf "$dist"
           mkdir -p "$dist"
           cp "$bin" "$dist/"
-          queue=("$bin")
+          cp worker/bridge/target/release/relay_bridge.dll "$dist/"
+          queue=("$bin" "worker/bridge/target/release/relay_bridge.dll")
           declare -A seen=()
           while [ "${#queue[@]}" -gt 0 ]; do
             current="${queue[0]}"
@@ -613,23 +648,47 @@ jobs:
               fi
             done < <(objdump -p "$current" 2>/dev/null | awk '/DLL Name/ {print $3}')
           done
+          cp host/packaging/README.txt "$dist/"
           ls -l "$dist"
           du -sh "$dist"
 
-      - name: Upload binary (Linux)
+      # The archive is what users actually download, and it carries the bilingual manual:
+      # a bare directory of DLLs leaves the operator guessing how to start the host and how to
+      # set the password. Windows uses Compress-Archive (always present); Linux uses tar.gz.
+      - name: Package release archive (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          dist="$PWD/host/target/release/dist"
+          out="$PWD/host/target/release/host-release-windows-${{ matrix.arch }}.zip"
+          powershell -NoProfile -Command \
+            "Compress-Archive -Path '$(cygpath -w "$dist")\*' -DestinationPath '$(cygpath -w "$out")' -Force"
+          ls -l "$out"
+
+      - name: Package release archive (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          dist=host/target/release/dist
+          cp host/packaging/README.txt "$dist/"
+          tar -czf "host/target/release/host-release-linux-${{ matrix.arch }}.tar.gz" -C "$dist" .
+          ls -l host/target/release/host-release-*.tar.gz
+
+      - name: Upload release archive (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: host-release-${{ matrix.platform }}-${{ matrix.arch }}
-          path: host/target/release/rustdesk
+          path: host/target/release/host-release-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
-      - name: Upload runnable directory (Windows)
+      - name: Upload release archive (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: host-release-${{ matrix.platform }}-${{ matrix.arch }}
-          path: host/target/release/dist/*
+          path: host/target/release/host-release-windows-${{ matrix.arch }}.zip
           if-no-files-found: error
 
       # The most common failure is a -sys build.rs, and cargo's log is folded/truncated in the web

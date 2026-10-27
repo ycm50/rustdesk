@@ -2640,6 +2640,18 @@ impl Connection {
                     log::info!("Permanent password accepted via logon-screen fallback");
                 }
             };
+            // The plain-text file beside the config is what the operator last wrote with
+            // --password, and it can be newer than the storage this process loaded at startup.
+            // While it exists it is the only authority: a password that was replaced on disk must
+            // stop working immediately, without restarting the host.
+            if let Some(storage) = crate::password_file::storage_for_auth() {
+                if !storage.is_empty() && self.validate_password_storage(&storage) {
+                    self.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::PermanentPassword);
+                    print_fallback();
+                    return true;
+                }
+                return false;
+            }
             // Strictly check storage usability before auth so malformed encrypted/hash storage
             // cannot fall back to being accepted as legacy plaintext.
             let (local_storage, local_salt) =

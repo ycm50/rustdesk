@@ -64,6 +64,13 @@ pub mod clipboard_file;
 
 pub mod privacy_mode;
 
+mod password_file;
+
+mod relay_bridge;
+
+#[cfg(windows)]
+mod tray;
+
 #[cfg(windows)]
 pub mod virtual_display_manager;
 

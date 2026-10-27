@@ -69,11 +69,15 @@ public final class WsTransport implements Transport {
 
             @Override
             public void onClosing(WebSocket ws, int code, String reason) {
+                // The code says why the far side gave up: 1009 is an oversized message, 1006 an
+                // abnormal drop (no close frame), 1000 a normal close.
+                LOG.info("ws closing: code=" + code + " reason=" + reason);
                 ws.close(1000, null);
             }
 
             @Override
             public void onClosed(WebSocket ws, int code, String reason) {
+                LOG.info("ws closed: code=" + code + " reason=" + reason);
                 closed = true;
                 handshake.countDown();
                 incoming.offer(new Frame(null, true));

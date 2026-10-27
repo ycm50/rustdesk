@@ -62,7 +62,7 @@ rustdesk/
 │   ├── docs/PROTOCOL.md                  协议事实与实现现状（每条带「文件:行号」出处）
 │   └── tools/                            selftest/、build-apk.ps1、check-all.ps1、verify-device.ps1
 │
-└── host/                                 【目录 B】RustDesk 的 Rust 被控端
+├── host/                                 【目录 B】RustDesk 的 Rust 被控端
     ├── Cargo.toml / Cargo.lock / build.rs / build.py
     ├── src/                              应用代码（server/ platform/ terminal/ …）
     ├── libs/                             hbb_common / base / scrap / enigo / clipboard / magnum-opus …
@@ -71,14 +71,22 @@ rustdesk/
     ├── res/ docs/ examples/ scripts/ fastlane/ flatpak/ appimage/
     ├── .cargo/config.toml
     └── Dockerfile / entrypoint.sh / TERMINAL.md
+│
+└── worker/                               【目录 C】可选的中继（Cloudflare Worker + 桥接）
+    ├── README.md                         部署、用法、已知边界
+    ├── wrangler.toml                     Durable Object 绑定、自定义域名、BRIDGE_KEY
+    ├── src/index.js                      路由：/websocket（观看端）、/bridge（桥接）、/health
+    ├── src/relay-session.js              Durable Object：按 key 配对两条 socket 并转发
+    └── bridge/                           被控端出站桥接，编译成 relay_bridge.dll（cdylib）
 ```
 
-两个目录的边界：
+三个目录的边界：
 
-- **没有任何构建期交叉引用**。`android/` 不调用 `host/` 里的任何东西，`host/` 也不知道 `android/` 存在。
+- **没有任何构建期交叉引用**。`android/` 不调用 `host/` 里的任何东西，`host/` 也不知道 `android/` 存在；`worker/` 同样不参与前两者的构建。
 - `android/app/src/main/java` 下共 **47 个 `.java`**：45 个手写文件在 `com/rustdesk/java/`，另有 2 个 protobuf 生成文件在 `hbb/`。
 - `host/`（改造后）构建不再产出 Flutter/Dart UI，也不使用 vcpkg；构建只需要 Rust 工具链与系统库。Dart/UI 树已删除，但 Rust 侧仍残留 `#[cfg(feature = "flutter")]` 门控的死代码（feature 已不再声明），历史 flutter 条件编译分支正在清理；`build.rs` 里的 `RUSTDESK_SCITER` 宏名虽带 Sciter 字样，实际守护的是 `--service-control` 的服务安装/卸载代码，不要当 UI 残留删除。`host/libs/magnum-opus` 已 vendored 进仓库并改为 path 依赖，`host/libs/hbb_common` 是普通目录而不是 git submodule。
-- `host/` 的默认 feature 是 `["use_dasp"]`；无头终端由 `host/src/terminal/` 提供，不启动任何图形界面。
+- `host/` 的默认 feature 是 `["use_dasp"]`；无头终端由 `host/src/terminal/` 提供。不带参数启动时进程驻留 **Windows 系统托盘**（`host/src/tray/`，纯 Win32）。Windows 上这个二进制编译为 **GUI 子系统**（`windows_subsystem = "windows"`），双击时系统不会创建控制台窗口；从 cmd/PowerShell 启动时由 `platform::attach_parent_console()` 把输出挂到该窗口。进入托盘路径后还会把 stdout/stderr 指向 NUL 并 `FreeConsole()`，屏幕上只剩任务栏图标；托盘不可用的会话里自动退回无头模式继续服务。
+- `worker/` 不属于上面两者的构建：它有自己的 `Cargo.toml`（仅桥接）与 `wrangler.toml`，也不进 `host/` 的 Cargo workspace。
 
 ## 两端怎么构建
 
@@ -166,7 +174,14 @@ host\scripts\fetch-ffmpeg.ps1   # Windows
 
 脚本的下载地址、版本与放置目录以脚本自身为准（本次文档改写未实际运行，待验证）。
 
-> 构建现状：Windows（MSYS2 UCRT64）本机构建已实测通过（`cargo build --release --features system-libs` 产出 22.9 MB 的 `rustdesk.exe`，`--version` / `--get-id` / `--help` 均可运行，动态依赖 8 个 DLL）；`linux-x64` / `linux-arm64` / `windows-x64` 三个 CI 组合尚未在 GitHub Actions 上实跑。
+> 构建现状：Windows（MSYS2 UCRT64）本机构建已实测通过（`cargo build --release --features system-libs` 产出 22.9 MB 的 `rustdesk.exe`，`--version` / `--get-id` / `--help` 均可运行，动态依赖 8 个 DLL）。`windows-x64` / `linux-x64` / `linux-arm64` 三个 CI 组合曾在 GitHub Actions 上跑过一次全绿（提交 `3bb1bec`，run 40439757697）；本次新增托盘、密码文件与中继库之后尚未重跑。
+
+### 固定密码与托盘（`host/`）
+
+- `rustdesk --password <密码>` **不再走 IPC**：直接把单向校验值写进 `data/config/RustDesk.toml`，并额外写一份明文副本 `data/config/permanent-password.txt` 供显示。
+- 每次有客户端登录都会重新读这份明文文件再校验，所以**运行中改密码旧密码立刻失效**，不用重启（只有横幅文字要重启才更新）。
+- 有固定密码时横幅显示密码本身，不再显示临时密码。
+- 不带参数启动 -> 系统托盘：菜单实时显示 ID / 密码 / 中继服务器，并提供重启、退出；托盘模式不显示任何终端界面（控制台被脱离、标准输出指向 NUL），日志仍照常写入 `data\log\`。
 
 ## 安卓端能力矩阵
 
@@ -229,6 +244,7 @@ ID 输入框**一个框三种用法**：
 | 纯数字 ID | `1182258341` | hbbs 打洞（失败则中继） | **需要** |
 | `IP` 或 `IP:端口` | `10.52.190.199:21118` | TCP 直连，完全不碰服务器 | **不需要**（同一局域网即可） |
 | 域名 | `rd.example.com` | 隧道 `wss://`（自动补协议头） | **需要** |
+| `wss://` 地址 | `wss://rdworker.example.com` | 自家 Worker 中继（见下节） | **需要**（被控端只要出站） |
 
 被控端要做局域网直连，需在 `data/config/RustDesk2.toml` 打开直连监听：
 
@@ -237,6 +253,26 @@ ID 输入框**一个框三种用法**：
 direct-server = 'Y'
 direct-access-port = '21118'
 ```
+
+## Worker 中继（可选，跨网络用）
+
+对称 NAT（运营商移动网络常见）下 ID 直连打不通、官方中继又可能连不上，`worker/` 提供一条完全自建的替代路径：
+
+```
+手机 ──WSS──> Cloudflare Worker / Durable Object ──WSS──> relay_bridge.dll ──TCP 127.0.0.1:21118──> 被控端
+```
+
+- 被控端**不需要任何入站端口或端口映射**，桥接是出站长连接。
+- 手机 ID 填 `wss://<你的域名>`；域名解析到 Cloudflare 边缘，境内通常可直连。
+- 桥接是一个独立动态库 `relay_bridge.dll`，只有带 `--relay-bridge` 时才会被 `LoadLibrary` 进内存：
+
+  ```powershell
+  .\rustdesk.exe --headless --relay-bridge "wss://rdworker.example.com/bridge?key=你的KEY"
+  .\rustdesk.exe --relay-bridge "wss://rdworker.example.com/bridge?key=你的KEY"   # 托盘 + 中继
+  ```
+
+- 两端分帧不同，桥接负责转换：TCP 侧是长度前缀（`host/libs/hbb_common/src/bytes_codec.rs`），WS 侧每帧只装裸消息（`websocket.rs` 的 `send_raw`）。
+- 部署与排障见 `worker/README.md`；`BRIDGE_KEY` 必须改成自己的随机串，否则任何人都能占用这个中继。
 
 ## CI：一个 workflow，两组 job
 
@@ -253,7 +289,12 @@ CI（改造后）由仓库根的单一 workflow `.github/workflows/build-release
 
 FFmpeg 不参与矩阵构建：默认只用系统库。`host/scripts/fetch-ffmpeg.{sh,ps1}` 可以按平台/架构取开源预构建件（win-x64 已实测：BtbN 包 + sha256 校验 + `.pc` 可直接被 pkg-config 读到），但 **`hwcodec` 尚未接线**——它的 `build.rs` 只认 vcpkg 布局的静态 FFmpeg，硬开这个 feature 会 panic，所以 CI 不提供该开关。
 
-Windows 的 `host-release-windows-x64` 不止一个 `.exe`：构建步骤会把 `rustdesk.exe` 与它递归导入的 8 个 DLL 一起放进 `dist/` 再上传（Linux 产物是单文件，依赖由发行版提供）。
+每个平台的产物都会打成一个**压缩包**（Windows `.zip`、Linux `.tar.gz`），包内除可执行文件与依赖库，还带一份中英双语的 `README.txt` 使用说明（源文件 `host/packaging/README.txt`，中文为主）。`dist/` 里是原始文件：
+
+- Windows：`rustdesk.exe` + 递归导入的 8 个 DLL + `relay_bridge.dll`；
+- Linux：`rustdesk` + `librelay_bridge.so`（其余依赖由发行版提供）。
+
+`worker/bridge` 不在 `host/` 的 workspace 里，所以 CI 单独为它跑一次 `cargo build`，再把库拷进 `dist/`。
 
 实际触发条件、系统包清单、缓存与超时都以 workflow 文件为准。本机没有实跑 GitHub Actions，三个矩阵组合的实际通过状态（尤其 `linux-arm64` 与 `windows-x64`）**待验证**。
 

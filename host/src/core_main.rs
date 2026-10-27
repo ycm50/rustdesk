@@ -412,20 +412,23 @@ pub fn core_main() -> Option<CoreMainAction> {
                 return None;
             }
             if args.len() == 2 {
-                if crate::platform::is_installed() && is_root() {
-                    if let Err(err) = crate::ipc::set_permanent_password(args[1].to_owned()) {
-                        println!("{err}");
-                    } else {
-                        println!("Done!");
+                // Written in this process rather than handed to the running instance: the
+                // operator's own config file is the source of truth for the next start.
+                if config::Config::set_permanent_password(&args[1]) {
+                    match crate::password_file::write(&args[1]) {
+                        Ok(()) => {
+                            println!("Done!");
+                            println!("  {}", crate::password_file::path().display());
+                        }
+                        Err(err) => {
+                            println!(
+                                "Permanent password saved, but the plain-text copy at {} could not be written: {err}",
+                                crate::password_file::path().display()
+                            );
+                        }
                     }
                 } else {
-                    // Not installed as a service: the running instance can still
-                    // set it over IPC, which is the route the UI itself uses.
-                    if let Err(err) = crate::ipc::set_permanent_password(args[1].to_owned()) {
-                        println!("{err}");
-                    } else {
-                        println!("Done!");
-                    }
+                    println!("Failed to set the permanent password, see the log for details.");
                 }
             }
             return None;
