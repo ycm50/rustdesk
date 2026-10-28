@@ -65,6 +65,8 @@ public final class KeyboardView extends View {
     private final List<Key[]> rows = new ArrayList<>();
     /** Keys we pressed a synthetic Shift for, so its release is sent back with the key. */
     private final List<Key> shiftedByUs = new ArrayList<>();
+    /** Keys whose release must send nothing because a chord replaced them (Ctrl+Alt+Del). */
+    private final List<Key> swallowed = new ArrayList<>();
     private final SparseArray<Key> heldByPointer = new SparseArray<>();
     /** Key released in the last moment, kept highlighted so a quick tap is still visible. */
     private Key recentlyReleased;
@@ -265,6 +267,15 @@ public final class KeyboardView extends View {
     private void sendDown(Key k) {
         if (sender == null) return;
         if (k.kind == KIND_CONTROL) {
+            // Windows never lets injected input raise the secure attention sequence, so the peer
+            // has to ask its own service for it. Recognise the chord here: sending the three keys
+            // separately would only deliver a plain Delete.
+            if (k.control == ControlKey.Delete && holdsModifier(ControlKey.Control)
+                    && holdsModifier(ControlKey.Alt)) {
+                sender.send(InputMessages.controlKeyPress(ControlKey.CtrlAltDel));
+                swallowed.add(k);
+                return;
+            }
             sender.send(InputMessages.controlKey(k.control, true, heldModifiers(k)));
             return;
         }
@@ -287,6 +298,9 @@ public final class KeyboardView extends View {
 
     private void sendUp(Key k) {
         if (sender == null) return;
+        if (swallowed.remove(k)) {
+            return;
+        }
         if (k.kind == KIND_CONTROL) {
             sender.send(InputMessages.controlKey(k.control, false, heldModifiers(k)));
             return;
@@ -297,6 +311,16 @@ public final class KeyboardView extends View {
         if (shiftedByUs.remove(k)) {
             sender.send(InputMessages.controlKey(ControlKey.Shift, false, heldModifiers(k)));
         }
+    }
+
+    private boolean holdsModifier(ControlKey wanted) {
+        for (int i = 0; i < heldByPointer.size(); i++) {
+            Key held = heldByPointer.valueAt(i);
+            if (held != null && held.kind == KIND_CONTROL && held.control == wanted) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -21,8 +21,15 @@ const USAGE: &str = "\
 RustDesk (terminal build)
 
 Usage:
-  rustdesk                          Run as a headless host in this console
-  rustdesk --headless [-v]          Start the host server explicitly, then stay attached
+  rustdesk                          Run the host in the notification area (no console window)
+  rustdesk --tray                   Same as above, spelled out (autostart passes this)
+  rustdesk --headless [-v]          Start the host server explicitly, then stay attached here
+  rustdesk --relay-bridge <url> [port]
+                                    Publish the direct-access port through a WSS relay
+                                    (loads relay_bridge.dll; port defaults to 21118)
+  rustdesk --install-service        Register the Windows service for THIS executable and start it
+                                    (needed for Ctrl+Alt+Del: only a SYSTEM service may raise SAS)
+  rustdesk --uninstall-service      Stop and delete the Windows service
   rustdesk --connect <id> [pass]    Show the peer's desktop as ANSI half-blocks
   rustdesk --terminal <id> [pass]   Open a remote shell in this console (Ctrl+] quits)
   rustdesk --file-transfer <id> [pass] <ls|get|put> ...
@@ -30,13 +37,18 @@ Usage:
   rustdesk --port-forward <id> [pass] <local_port> <host> <port>
                                     Tunnel a local port to the peer
   rustdesk --get-id                 Print this device ID
-  rustdesk --password <pass>        Set the permanent password
+  rustdesk --password <pass>        Set the permanent password (writes data/config; no IPC)
   rustdesk --option <k> [<v>]       Read or write a configuration option
   rustdesk --version                Print the version
 
 Options:
   -v, --verbose                     Echo every host log line to stdout
   -h, --help                        Print this help
+
+  --relay-bridge takes the hosted URL as wss://host/path?key=... ; the optional second
+  argument is the local direct-access port the bridge forwards to.
+  The service is registered against the binary that is running, so a portable copy never
+  points at C:\\Program Files.
 
 Environment:
   RUSTDESK_TERM_256=1               Use 256 colours instead of truecolor

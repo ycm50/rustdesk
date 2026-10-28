@@ -1,6 +1,6 @@
-# RustDesk 1.5.1 Windows 纯终端版使用说明
+# RustDesk 1.0.0 Windows 纯终端版使用说明
 
-这是 RustDesk 1.5.1 的 Windows 纯终端版本：没有图形界面，只有无头终端，外加一个系统托盘（见第五节）。不带参数启动时进程驻留通知区域；带 \`--headless\` 则留在控制台里。
+这是 RustDesk 1.0.0 的 Windows 纯终端版本：没有图形界面，只有无头终端，外加一个系统托盘（见第五节）。不带参数启动时进程驻留通知区域；带 \`--headless\` 则留在控制台里。
 
 支持的主要功能：
 
@@ -94,7 +94,7 @@ rustdesk-terminal\data\log\
 启动后会显示类似信息：
 
 ```text
-RustDesk 1.5.1 终端被控端
+RustDesk 1.0.0 终端被控端
   设备 ID    : 371956946
   固定密码   : yourpass（用 `rustdesk --password <密码>` 修改）
   中继服务器 : rs-ny.rustdesk.com:21116

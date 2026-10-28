@@ -29,20 +29,24 @@ name: Build release (Android + host)
 # while host/scripts/fetch-ffmpeg.* fetch the GPL *shared* prebuilts for manual use (nothing
 # consumes FFMPEG_DIR/FFMPEG_PKG_CONFIG_PATH), so enabling the feature would panic.
 on:
-  push:
-    paths:
-      - 'android/**'
-      - 'host/**'
-      - '.github/workflows/build-release.yml'
-  pull_request:
-    paths:
-      - 'android/**'
-      - 'host/**'
-      - '.github/workflows/build-release.yml'
+  # Manual only: a release build is an explicit act, not a side effect of pushing. Run it from
+  # Actions -> "Build release" -> Run workflow, with the version as the tag name.
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag = version, e.g. v1.0.0"
+        required: true
+        default: "v1.0.0"
+        type: string
+      prerelease:
+        description: "Mark the release as a pre-release"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: read
+  # The release job pushes an annotated tag and creates the release.
+  contents: write
 
 # GitHub gives private repositories 2000 minutes a month (Linux 1x). When a branch is pushed again
 # the old run has no value; cancelling it saves quota and stops two jobs racing for the same cache.
@@ -58,9 +62,28 @@ env:
   CARGO_NET_RETRY: '5'
 
 jobs:
+  # ------------------------------------------------------------------ guard
+  # A release without a tag is meaningless, and the build jobs below are expensive: refuse to
+  # start before anything is compiled. An empty workflow_dispatch input arrives as "".
+  guard:
+    name: Require a release tag
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse to build without a tag
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          if [ -z "${tag//[[:space:]]/}" ]; then
+            echo "::error::release_tag is empty - refusing to build without a release tag"
+            exit 1
+          fi
+          echo "release tag: $tag"
+
   # ------------------------------------------------------------------ Android client
   android:
     name: Android client (release APK)
+    needs: [guard]
     runs-on: ubuntu-latest
     # The job hard limit is 6 hours; this project builds in 47 s locally, 30 minutes is plenty to
     # locate a hang.
@@ -274,6 +297,7 @@ jobs:
   # ------------------------------------------------------------------ Rust host (Linux + Windows matrix)
   host:
     name: Host (${{ matrix.platform }}-${{ matrix.arch }})
+    needs: [guard]
     # Each entry produces host-release-<platform>-<arch>. fail-fast is off so one broken platform
     # still leaves the other artifacts intact.
     strategy:
@@ -705,3 +729,73 @@ jobs:
             host/target/release/build/**/stderr
           if-no-files-found: ignore
           retention-days: 7
+
+  # ------------------------------------------------------------------ release
+  # Both build families must succeed first: `needs` keeps a failed build from leaving a tag
+  # behind, which is the whole point of tagging here instead of after the fact.
+  release:
+    name: Tag and publish
+    needs: [android, host]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      # The tag is the version; refuse to tag something that says otherwise.
+      - name: Check the tag matches the version in this commit
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          version="${tag#v}"
+          host_version=$(sed -n 's/^version = "\(.*\)"/\1/p' host/Cargo.toml | head -n1)
+          android_version=$(sed -n 's/.*versionName "\(.*\)"/\1/p' android/app/build.gradle | head -n1)
+          echo "tag=$tag version=$version host=$host_version android=$android_version"
+          if [ "$version" != "$host_version" ] || [ "$version" != "$android_version" ]; then
+            echo "::error::release_tag $tag does not match host ($host_version) / android ($android_version)"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::tag $tag already exists"
+            exit 1
+          fi
+
+      # The tag message carries every commit since the previous tag, so `git show <tag>` answers
+      # "what is in this release" without visiting GitHub.
+      - name: Write the tag message from the commits since the previous tag
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          previous=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          if [ -n "$previous" ]; then range="$previous..HEAD"; else range="HEAD"; fi
+          {
+            echo "Release $tag"
+            echo
+            echo "Commits since ${previous:-the beginning}:"
+            echo
+            git log --no-merges --pretty='- %s (%h)' "$range"
+          } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
+      - name: Tag and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -F RELEASE_NOTES.md
+          git push origin "refs/tags/$tag"
+          mapfile -t assets < <(find dist -type f)
+          printf '%s\n' "${assets[@]}"
+          flags=()
+          if [ "${{ inputs.prerelease }}" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$tag" --title "$tag" --notes-file RELEASE_NOTES.md \
+            --verify-tag "${flags[@]}" "${assets[@]}"

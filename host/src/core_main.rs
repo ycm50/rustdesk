@@ -355,11 +355,25 @@ pub fn core_main() -> Option<CoreMainAction> {
             return None;
         } else if args[0] == "--install-service" {
             log::info!("start --install-service");
-            crate::platform::install_service();
+            // The operator ran a command, not a background task: say whether it worked, because
+            // a silently broken service registration is invisible until the next reboot.
+            if crate::platform::install_service() {
+                println!("Failed to install the service (see data\\log for details).");
+            } else {
+                println!(
+                    "Service installed and started for {}",
+                    std::env::current_exe()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "this executable".to_owned())
+                );
+            }
             return None;
         } else if args[0] == "--uninstall-service" {
             log::info!("start --uninstall-service");
-            crate::platform::uninstall_service(false, true);
+            let failed = crate::platform::uninstall_service(false, true);
+            if failed {
+                println!("Failed to uninstall the service (see data\\log for details).");
+            }
             return None;
         } else if args[0] == "--service" {
             log::info!("start --service");

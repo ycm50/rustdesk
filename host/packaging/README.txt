@@ -50,6 +50,50 @@
   安全提醒：permanent-password.txt 是明文，配置文件目录属于敏感目录，不要外发或提交。
   Security: permanent-password.txt is plain text; keep the data\config directory private.
 
+
+【三之一、Windows 服务（Ctrl+Alt+Del 的前提）/ The Windows service】
+
+  rustdesk.exe --install-service     以管理员身份运行一次即可
+  rustdesk.exe --uninstall-service   停止并删除服务
+
+  为什么要装它：Windows 不允许普通进程注入 Ctrl+Alt+Del（安全注意序列 SAS），
+  只有以 SYSTEM 身份运行的服务才能调用 SendSAS。装了服务之后，Ctrl+Alt+Del /
+  Win+Shift+S 这类系统级组合键才有意义（其它组合键不需要服务，直接可用）。
+
+  安装行为：
+  - 服务注册到**当前正在运行的这个 exe**（动态解析路径并 canonicalize），不是写死的
+    C:\Program Files\RustDesk；便携目录、U 盘、下载目录都能正确注册；
+  - 启动类型 AUTO_START，身份 LocalSystem，服务名 RustDesk；
+  - 服务启动后会在用户会话里拉起主机进程（托盘图标由它出现），因此**不需要**再去
+    启动文件夹或计划任务里另配自启；重复配置会导致两份实例抢 IPC；
+  - 命令结束时会打印结果（成功会显示注册到哪个路径）。
+
+  卸载行为：按服务名 sc stop + sc delete，即使旧版本注册到了别的路径也能清干净。
+
+  Why: Windows never lets an injected keystroke raise the secure attention sequence; only a
+  SYSTEM service may call SendSAS. The service is registered against the running executable
+  (path resolved dynamically, never a hard-coded C:\Program Files), starts automatically as
+  LocalSystem, and launches the host inside the user session - so no separate autostart entry
+  is needed. Uninstall stops and deletes it by name.
+
+【三之二、自启的正确姿势 / Autostart】
+
+  - 装了服务：服务开机自启，并在用户登录后拉起主机 —— 不要再加启动文件夹快捷方式或计划任务；
+  - 没装服务：把 exe 的快捷方式放进启动文件夹即可；
+  - 若发现“RustDesk Tray.lnk 指向 C:\Program Files\RustDesk\RustDesk.exe 但文件不存在”，
+    那是旧版本安装脚本留下的坏项，删掉它。
+
+  With the service installed, boot and logon are covered - do not add a Startup shortcut or a
+  scheduled task on top of it. Without the service, put a shortcut in the Startup folder.
+
+【三之三、组合键 / Key combinations】
+
+  手机端全键盘：按住修饰键（Ctrl / Alt / Win / Shift）再点其它键即可组合；
+  Ctrl+Alt+Del 需要上面说的服务；Win+Shift+S 等系统组合键同理（注入真实的按下/抬起）。
+
+  On the phone keyboard, hold a modifier and tap another key. Ctrl+Alt+Del needs the service;
+  other system combinations work as long as the peer sees real key down/up events.
+
 【四、连接与中继 / Connecting and the relay】
 
   同一局域网：手机 ID 填 <被控端 IP>:21118，并在 data\config\RustDesk2.toml 里设置

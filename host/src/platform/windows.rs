@@ -3339,14 +3339,16 @@ pub fn try_lock_tray_single_instance() -> bool {
 pub fn uninstall_service(show_new_window: bool, _: bool) -> bool {
     log::info!("Uninstalling service...");
     let filter = format!(" /FI \"PID ne {}\"", get_current_pid());
-    let (_, _, _, exe) = get_install_info();
-    let remove_service = match service_control_command("remove", &exe, false) {
-        Ok(commands) => commands,
-        Err(err) => {
-            log::error!("Failed to prepare service removal: {err}");
-            return true;
-        }
-    };
+    let app_name = crate::get_app_name();
+    // Remove by service name rather than by the installer layout: an older build may have
+    // registered it against a path that no longer exists, and sc still finds it by name.
+    if let Err(err) = run_sc(&["stop", app_name.as_str()]) {
+        log::debug!("sc stop: {err}");
+    }
+    if let Err(err) = run_sc(&["delete", app_name.as_str()]) {
+        log::debug!("sc delete: {err}");
+    }
+    let remove_service = String::new();
     Config::set_option("stop-service".into(), "Y".into());
     let cmds = format!(
         "
@@ -3368,6 +3370,9 @@ pub fn uninstall_service(show_new_window: bool, _: bool) -> bool {
     std::process::exit(0);
 }
 
+/// Kept for the packaged installer flow: the portable path registers the service directly in
+/// `install_service_for_running_binary` because it has no output directory to copy into.
+#[allow(dead_code)]
 fn get_install_service_commands(path: &str, exe: &str) -> ResultType<InstallCommands> {
     let app_name = crate::get_app_name();
     for value in [path, exe] {
@@ -3404,28 +3409,76 @@ copy /Y \"%RUSTDESK_OUTPUT_DIR%\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsof
     })
 }
 
+/// Absolute path of the binary that is running right now.
+///
+/// The service has to follow wherever the binary actually lives: this build runs from any folder
+/// (a portable copy, a USB stick, Downloads), while the packaged installer layout
+/// (`C:\Program Files\RustDesk`) may not exist at all. Registering that hard-coded path produced a
+/// service SCM could never start ("the system cannot find the file specified").
+fn current_exe_path() -> ResultType<PathBuf> {
+    let exe = std::env::current_exe()?;
+    // canonicalize resolves short 8.3 names and symlinks, so the registered binPath names the
+    // same file SCM will later try to start.
+    Ok(exe.canonicalize().unwrap_or(exe))
+}
+
+/// Runs `sc.exe` without flashing a console window; the exit status answers "did it work".
+fn run_sc(args: &[&str]) -> ResultType<bool> {
+    let status = std::process::Command::new("sc.exe")
+        .args(args)
+        .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
+        .status()?;
+    Ok(status.success())
+}
+
+/// Registers the service against the running binary and starts it.
+fn install_service_for_running_binary() -> ResultType<String> {
+    let exe = current_exe_path()?;
+    let exe = exe
+        .to_str()
+        .ok_or_else(|| anyhow!("Executable path is not valid Unicode"))?;
+    validate_install_value(exe)?;
+    let app_name = crate::get_app_name();
+    let bin_path = format!("\"{exe}\" --service");
+    let created = run_sc(&[
+        "create",
+        app_name.as_str(),
+        "binPath=",
+        bin_path.as_str(),
+        "start=",
+        "auto",
+        "DisplayName=",
+        "RustDesk Service",
+    ])?;
+    if !created {
+        // Already registered, possibly against a stale path: repoint it at this binary.
+        run_sc(&[
+            "config",
+            app_name.as_str(),
+            "binPath=",
+            bin_path.as_str(),
+            "start=",
+            "auto",
+        ])?;
+    }
+    run_sc(&["start", app_name.as_str()])?;
+    Ok(exe.to_owned())
+}
+
 pub fn install_service() -> bool {
     log::info!("Installing service...");
     let _installing = crate::platform::InstallingService::new();
-    let (_, path, _, exe) = get_install_info();
     Config::set_option("stop-service".into(), "".into());
-    let cmds = match get_install_service_commands(&path, &exe) {
-        Ok(cmds) => cmds,
-        Err(err) => {
-            Config::set_option("stop-service".into(), "Y".into());
-            log::error!("Failed to prepare service installation: {err}");
-            return true;
+    match install_service_for_running_binary() {
+        Ok(exe) => {
+            log::info!("Service registered for {}", exe);
+            false
         }
-    };
-    crate::ipc::EXIT_RECV_CLOSE.store(false, Ordering::Relaxed);
-    if let Err(err) = run_cmds(cmds, false, "install") {
-        Config::set_option("stop-service".into(), "Y".into());
-        crate::ipc::EXIT_RECV_CLOSE.store(true, Ordering::Relaxed);
-        log::debug!("{err}");
-        return true;
+        Err(err) => {
+            log::error!("Failed to install service: {:#}", err);
+            true
+        }
     }
-    run_after_run_cmds(false);
-    std::process::exit(0);
 }
 
 /// Calculate the total size of a directory in KB
