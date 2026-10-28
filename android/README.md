@@ -79,13 +79,23 @@ adb shell pm install -r /data/local/tmp/x.apk
 
 ### 连接电脑
 
-ID 输入框**一个框三种用法**：
+ID 输入框**一个框四种用法**：
 
 | 输入 | 含义 | 是否需要公网 |
 |---|---|---|
 | `1182258341` | 走服务器打洞 | 需要 |
-| `10.52.190.199:21118` | 局域网直连 | **不需要** |
-| `rd.example.com` | 隧道域名（自动补 `wss://`） | 需要 |
+| `10.52.190.199:21118` | 局域网直连（TCP） | **不需要** |
+| `node.example.com:12345` | **带端口的域名直连（TCP）**：frp / SakuraFrp 之类隧道给出的节点地址 | 需要（隧道要在线） |
+| `rd.example.com` | 隧道域名（无端口，自动补 `wss://`） | 需要 |
+
+判定规则（`Session.normalizeTunnelUrl` / `parseDirectAddress`）：
+
+- 显式写了 `ws://` / `wss://` / `http://` / `https://` → 一律按 WebSocket 隧道；
+- 带显式端口（`host:port`）且没写协议 → **TCP 直连**，主机名交给系统 DNS 解析；
+- 不带端口的点号域名 → 仍是 `wss://` 隧道（保持旧行为）；
+- 纯数字 → 仍走服务器打洞。
+
+> 走 TCP 隧道时被控端必须开 `direct-server = 'Y'`（见下），隧道本地地址填 `127.0.0.1:21118`。
 
 被控端需要开启直连监听，编辑 `data/config/RustDesk2.toml`：
 
@@ -111,11 +121,22 @@ direct-access-port = '21118'
 - **右上三个按钮**（竖排）：`⟳` 重连、`⌨` 软键盘、模式切换。
 - **三种输入模式**：
   - `TEXT` 普通输入 —— 软键盘内容整体发送，**唯一能正确输入中文的模式**
-  - `SHORTCUT` 快捷键 —— `Ctrl+C/V/X/Z/A/S`、`Alt+Tab`、`Ctrl+Shift+Esc` 等组合键，顶部弹出面板
+  - `SHORTCUT` 快捷键 —— `Ctrl+C/V/X/Z/A/S`、`Alt+Tab`、`Ctrl+Shift+Esc`、`Ctrl+Alt+Del` 等组合键，顶部弹出面板
+    （`Ctrl+Alt+Del` 发的是协议里的 `ControlKey::CtrlAltDel`：Windows 不允许注入 SAS，只能由对端服务自己发）
   - `KEYS` 虚拟键盘 —— 全键自绘键盘（F1–F12、数字、字母、修饰键、方向键），**支持多指共按**，可按住 Shift 再点字母
 
-  按钮标签是 `TEXT`/`SHORTCUT`/`KEYS`，`SharedPreferences` 里存的内部名是 `Normal`/`Shortcut`/`Virtual`；
-  键事件按 `KeyboardMode.Translate`（普通输入）与 `KeyboardMode.Legacy`（快捷键/虚拟键）发给对端。
+  按钮标签是 `TEXT`/`SHORTCUT`/`KEYS`，`SharedPreferences` 里存的内部名是 `Normal`/`Shortcut`/`Virtual`。
+
+  对端是 Windows 时，虚拟键盘的字符键按 **`KeyboardMode.Map` + Windows 扫描码**发送
+  （`Session/ScanCodes.java` 提供表，host 侧走 `map_keyboard_mode` → `sim_rdev_rawkey_position`）：
+  每个键都有真正的按下/抬起，所以多键共按、长按、Shift/Ctrl 组合都能生效。
+  其它平台的对端仍走原来的 `unicode` 单字符发送（那种方式一次只打一个字符，无法按住不放）。
+  普通输入 `TEXT` 仍用 `KeyboardMode.Translate`，快捷键用 `Legacy`。
+
+  **组合键必须携带当前按住的修饰键**：host 在处理任何 key-down 前会先调
+  `release_unpressed_modifiers`，把没有写进该事件 `KeyEvent.modifiers` 的修饰键全部释放。
+  所以客户端每个事件都要带上 `modifiers` 列表（`InputMessages.controlKey/keyPosition(..., held)`），
+  否则按第二个修饰键时第一个就被清掉，`Win+Shift+S` 这类组合永远不成立。
 
 ## 目录结构
 

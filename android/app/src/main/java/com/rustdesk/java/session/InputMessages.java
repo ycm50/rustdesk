@@ -90,12 +90,28 @@ public final class InputMessages {
 
     /** Backspace, arrows and friends go through {@code control_key}. */
     public static Message controlKey(hbb.MessageOuterClass.ControlKey key, boolean down) {
-        KeyEvent event = KeyEvent.newBuilder()
+        return controlKey(key, down, Collections.emptyList());
+    }
+
+    /**
+     * A control key with the modifiers that are being held alongside it.
+     *
+     * <p>The host releases every modifier that is not listed in {@code KeyEvent.modifiers} before
+     * handling a key-down ({@code release_unpressed_modifiers}), so a chord that omits them keeps
+     * only its last modifier: that is why Win+Shift+S and Ctrl+Shift+Esc used to do nothing.
+     */
+    public static Message controlKey(hbb.MessageOuterClass.ControlKey key, boolean down,
+                                     java.util.List<hbb.MessageOuterClass.ControlKey> held) {
+        KeyEvent.Builder builder = KeyEvent.newBuilder()
                 .setControlKey(key)
                 .setDown(down)
-                .setPress(false)
-                .build();
-        return Message.newBuilder().setKeyEvent(event).build();
+                .setPress(false);
+        if (held != null) {
+            for (hbb.MessageOuterClass.ControlKey modifier : held) {
+                builder.addModifiers(modifier);
+            }
+        }
+        return Message.newBuilder().setKeyEvent(builder.build()).build();
     }
 
     /**
@@ -103,11 +119,48 @@ public final class InputMessages {
      * (src/ui_session_interface.rs sets only {@code press} for a click).
      */
     public static Message controlKeyPress(ControlKey key) {
-        KeyEvent event = KeyEvent.newBuilder()
+        return controlKeyPress(key, Collections.emptyList());
+    }
+
+    /** A click with the modifiers that are held alongside it; see {@link #controlKey}. */
+    public static Message controlKeyPress(ControlKey key,
+                                          java.util.List<hbb.MessageOuterClass.ControlKey> held) {
+        KeyEvent.Builder builder = KeyEvent.newBuilder()
                 .setControlKey(key)
-                .setPress(true)
-                .build();
-        return Message.newBuilder().setKeyEvent(event).build();
+                .setPress(true);
+        if (held != null) {
+            for (hbb.MessageOuterClass.ControlKey modifier : held) {
+                builder.addModifiers(modifier);
+            }
+        }
+        return Message.newBuilder().setKeyEvent(builder.build()).build();
+    }
+
+    /**
+     * A physical key on the peer, addressed by scan code and injected with real down/up state.
+     *
+     * <p>Map mode keeps key state on the peer side, which is what makes several keys work at once
+     * (Shift+A, Ctrl+C, two arrows held together). The unicode path types one character per
+     * message and has no notion of a held key, so it cannot express a chord.
+     */
+    public static Message keyPosition(int scanCode, boolean down) {
+        return keyPosition(scanCode, down, Collections.emptyList());
+    }
+
+    /** A physical key press with the modifiers that are held alongside it. */
+    public static Message keyPosition(int scanCode, boolean down,
+                                      java.util.List<hbb.MessageOuterClass.ControlKey> held) {
+        KeyEvent.Builder builder = KeyEvent.newBuilder()
+                .setChr(scanCode)
+                .setDown(down)
+                .setPress(false)
+                .setMode(hbb.MessageOuterClass.KeyboardMode.Map);
+        if (held != null) {
+            for (hbb.MessageOuterClass.ControlKey modifier : held) {
+                builder.addModifiers(modifier);
+            }
+        }
+        return Message.newBuilder().setKeyEvent(builder.build()).build();
     }
 
     public static Message unicode(char c) {
@@ -194,10 +247,14 @@ public final class InputMessages {
         // Control keys (Backspace, Return, arrows...) exist only in the peer's legacy keyboard
         // path: its translate path has no branch for them and drops the event as unexpected.
         // Text keeps the configured mode, which is what makes IME input work.
+        // A scan-code key is already built for Map mode (see keyPosition); the configured mode
+        // governs typed text, not the on-screen keyboard's physical keys.
         hbb.MessageOuterClass.KeyboardMode mode =
                 event.getUnionCase() == KeyEvent.UnionCase.CONTROL_KEY
                         ? hbb.MessageOuterClass.KeyboardMode.Legacy
-                        : keyboardMode;
+                        : event.getMode() == hbb.MessageOuterClass.KeyboardMode.Map
+                                ? hbb.MessageOuterClass.KeyboardMode.Map
+                                : keyboardMode;
         if (event.getMode() == mode) {
             return message;
         }

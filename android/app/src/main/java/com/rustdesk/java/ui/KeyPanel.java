@@ -36,6 +36,8 @@ public final class KeyPanel extends LinearLayout {
     }
 
     private final Sender sender;
+    /** Whether the peer accepts Windows scan codes; see {@link KeyboardView}. */
+    private java.util.function.BooleanSupplier physicalKeys = () -> true;
     private OnCloseListener closeListener;
     private final TextView title;
 
@@ -77,6 +79,13 @@ public final class KeyPanel extends LinearLayout {
         addView(header, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
     }
 
+    /** Asked once per {@link #showMode} so a late peer report is still honoured. */
+    public void setPhysicalKeysSupplier(java.util.function.BooleanSupplier supplier) {
+        if (supplier != null) {
+            this.physicalKeys = supplier;
+        }
+    }
+
     /** @param mode "Shortcut" for the combination grid, anything else for the full keyboard */
     public void showMode(String mode, boolean fullKeyboard) {
         // Drop everything below the header, then rebuild for the requested mode.
@@ -87,7 +96,7 @@ public final class KeyPanel extends LinearLayout {
         setTranslationY(0f);
         if (fullKeyboard) {
             title.setText("KEYBOARD");
-            addView(new KeyboardView(getContext(), sender::send),
+            addView(new KeyboardView(getContext(), sender::send, physicalKeys.getAsBoolean()),
                     new LayoutParams(LayoutParams.MATCH_PARENT, dp(190)));
         } else {
             title.setText("SHORTCUTS");
@@ -109,6 +118,9 @@ public final class KeyPanel extends LinearLayout {
         addRow(new String[] { "Ctrl+Z+", "Alt+Tab", "Esc", "Enter" },
                 new String[] { "y", null, null, null });
         addRow(new String[] { "Tab", "Win+D", "Ctrl+Shift+Esc", "F5" }, new String[] { null, "d", null, null });
+        // One row on its own: Windows never lets injected input raise the secure attention
+        // sequence, so this needs the peer's own service and deserves to be easy to hit.
+        addRow(new String[] { "Ctrl+Alt+Del" }, new String[] { null });
     }
 
     private void buildFullKeyboard() {
@@ -241,6 +253,12 @@ public final class KeyPanel extends LinearLayout {
      * comes from {@code comboKey} (a letter typed with Ctrl held) or from the trailing name.
      */
     private void sendShortcut(String label, String comboKey) {
+        if ("Ctrl+Alt+Del".equals(label)) {
+            // The peer fires its secure attention sequence through its own service; sending the
+            // three keys is pointless because Windows drops synthetic Ctrl+Alt+Del.
+            send(InputMessages.controlKeyPress(ControlKey.CtrlAltDel));
+            return;
+        }
         String[] parts = label.split("\\+");
         int modifiers = 0;
         for (int i = 0; i < parts.length - 1; i++) {
@@ -249,15 +267,24 @@ public final class KeyPanel extends LinearLayout {
         pressModifiers(modifiers, true);
         String key = parts[parts.length - 1];
         if (comboKey != null) {
-            send(InputMessages.unicode(comboKey.charAt(0)));
+            // Same reasoning as the on-screen keyboard: a scan-code press is a real key press, so
+            // the modifiers pressed just above apply to it. Typing the character instead bypasses
+            // them, which is why Ctrl+C used to do nothing.
+            int code = physicalKeys.getAsBoolean() ? com.rustdesk.java.session.ScanCodes.of(comboKey.charAt(0)) : 0;
+            if (code != 0) {
+                send(InputMessages.keyPosition(code, true, new java.util.ArrayList<>(heldModifiers)));
+                send(InputMessages.keyPosition(code, false, new java.util.ArrayList<>(heldModifiers)));
+            } else {
+                send(InputMessages.unicode(comboKey.charAt(0)));
+            }
         } else if ("Esc".equals(key)) {
-            send(InputMessages.controlKeyPress(ControlKey.Escape));
+            send(InputMessages.controlKeyPress(ControlKey.Escape, new java.util.ArrayList<>(heldModifiers)));
         } else if ("Enter".equals(key)) {
-            send(InputMessages.controlKeyPress(ControlKey.Return));
+            send(InputMessages.controlKeyPress(ControlKey.Return, new java.util.ArrayList<>(heldModifiers)));
         } else if ("Tab".equals(key)) {
-            send(InputMessages.controlKeyPress(ControlKey.Tab));
+            send(InputMessages.controlKeyPress(ControlKey.Tab, new java.util.ArrayList<>(heldModifiers)));
         } else if ("F5".equals(key)) {
-            send(InputMessages.controlKeyPress(ControlKey.F5));
+            send(InputMessages.controlKeyPress(ControlKey.F5, new java.util.ArrayList<>(heldModifiers)));
         } else {
             Log.i(TAG, "shortcut without a mapping: " + label);
         }
@@ -273,11 +300,29 @@ public final class KeyPanel extends LinearLayout {
     }
 
     private void pressModifiers(int bits, boolean down) {
-        if ((bits & 1) != 0) send(InputMessages.controlKey(ControlKey.Control, down));
-        if ((bits & 2) != 0) send(InputMessages.controlKey(ControlKey.Alt, down));
-        if ((bits & 4) != 0) send(InputMessages.controlKey(ControlKey.Shift, down));
-        if ((bits & 8) != 0) send(InputMessages.controlKey(ControlKey.Meta, down));
+        if ((bits & 1) != 0) modifier(ControlKey.Control, down);
+        if ((bits & 2) != 0) modifier(ControlKey.Alt, down);
+        if ((bits & 4) != 0) modifier(ControlKey.Shift, down);
+        if ((bits & 8) != 0) modifier(ControlKey.Meta, down);
     }
+
+    /**
+     * Presses or releases one modifier, always telling the peer which modifiers stay held: the
+     * host releases anything a key-down omits, so without this each new modifier would cancel the
+     * previous one and no combination would ever complete.
+     */
+    private void modifier(ControlKey key, boolean down) {
+        if (down) {
+            send(InputMessages.controlKey(key, true, new java.util.ArrayList<>(heldModifiers)));
+            heldModifiers.add(key);
+        } else {
+            heldModifiers.remove(key);
+            send(InputMessages.controlKey(key, false, new java.util.ArrayList<>(heldModifiers)));
+        }
+    }
+
+    /** Control keys pressed by a shortcut, kept so the following key can list them. */
+    private final java.util.List<ControlKey> heldModifiers = new java.util.ArrayList<>();
 
     private void send(Message message) {
         if (sender != null) {

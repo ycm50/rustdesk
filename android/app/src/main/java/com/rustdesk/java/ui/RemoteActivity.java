@@ -259,6 +259,11 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
                 current.sendMessage(message);
             }
         });
+        // The on-screen keyboard sends Windows scan codes in Map mode, the only mode that holds a
+        // key down (the peer otherwise types one character per message and cannot chord). The peer
+        // platform arrives after the handshake, so this is asked each time the keyboard is built.
+        keyPanel.setPhysicalKeysSupplier(() -> peerPlatform != null
+                && peerPlatform.toLowerCase(java.util.Locale.ROOT).contains("windows"));
         keyPanel.setVisibility(android.view.View.GONE);
         final android.content.SharedPreferences prefs =
                 getSharedPreferences("rustdesk_java_prefs", MODE_PRIVATE);

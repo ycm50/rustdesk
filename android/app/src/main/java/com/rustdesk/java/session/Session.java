@@ -185,10 +185,40 @@ public class Session implements Runnable {
         if (lower.startsWith("wss://") || lower.startsWith("ws://")) return value;
         if (lower.startsWith("https://")) return "wss://" + value.substring(8);
         if (lower.startsWith("http://")) return "ws://" + value.substring(7);
+        // host:port with no scheme is a plain TCP endpoint, not a tunnel URL: the host speaks
+        // length-prefixed frames on 21118 and a raw TCP forward (an frp-style tunnel, or a named
+        // LAN machine) keeps them, while the WebSocket path expects one bare message per frame.
+        if (explicitPort(value) > 0) return null;
         // A hostname rather than a numeric id: the id rules already reject these, so a dotted name
         // here can only mean a tunnel endpoint.
         if (lower.contains(".") && !lower.matches("[0-9.]+")) return "wss://" + value;
         return null;
+    }
+
+    /** @return the port in "host:port", or 0 when the value carries no usable one */
+    private static int explicitPort(String value) {
+        int colon = value.lastIndexOf(':');
+        if (colon <= 0 || colon == value.length() - 1) return 0;
+        try {
+            int port = Integer.parseInt(value.substring(colon + 1));
+            return port > 0 && port <= 65535 ? port : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private static boolean isIpv4(String host) {
+        String[] parts = host.split("\\.");
+        if (parts.length != 4) return false;
+        for (String part : parts) {
+            try {
+                int octet = Integer.parseInt(part);
+                if (octet < 0 || octet > 255) return false;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -216,8 +246,9 @@ public class Session implements Runnable {
     }
 
     /**
-     * Recognises an {@code IPv4} or {@code IPv4:port} peer id. Falls back to RustDesk's default
-     * direct access port when none is given.
+     * Recognises an {@code IPv4}, {@code IPv4:port}, or a dotted {@code host:port} (a tunnel node
+     * or a named LAN machine). Falls back to RustDesk's default direct access port when none is
+     * given.
      */
     private static InetSocketAddress parseDirectAddress(String peerId) {
         if (peerId == null) return null;
@@ -234,16 +265,12 @@ public class Session implements Runnable {
             }
             if (port <= 0 || port > 65535) return null;
         }
-        String[] parts = host.split("\\.");
-        if (parts.length != 4) return null;
-        for (String part : parts) {
-            try {
-                int octet = Integer.parseInt(part);
-                if (octet < 0 || octet > 255) return null;
-            } catch (NumberFormatException e) {
-                return null;
-            }
-        }
+        if (host.isEmpty()) return null;
+        if (isIpv4(host)) return new InetSocketAddress(host, port);
+        // A named endpoint, e.g. the node a TCP tunnel hands out. Only dotted names reach here, so a
+        // mistyped id never turns into a DNS lookup; the socket resolves it on connect and reports
+        // an unknown host as an ordinary connection error.
+        if (!host.contains(".")) return null;
         return new InetSocketAddress(host, port);
     }
 

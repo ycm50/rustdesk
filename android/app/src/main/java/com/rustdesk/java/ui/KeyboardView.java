@@ -9,6 +9,7 @@ import android.view.MotionEvent;
 import android.view.View;
 
 import com.rustdesk.java.session.InputMessages;
+import com.rustdesk.java.session.ScanCodes;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -60,7 +61,10 @@ public final class KeyboardView extends View {
     }
 
     private final Sender sender;
+    private final boolean physicalKeys;
     private final List<Key[]> rows = new ArrayList<>();
+    /** Keys we pressed a synthetic Shift for, so its release is sent back with the key. */
+    private final List<Key> shiftedByUs = new ArrayList<>();
     private final SparseArray<Key> heldByPointer = new SparseArray<>();
     /** Key released in the last moment, kept highlighted so a quick tap is still visible. */
     private Key recentlyReleased;
@@ -71,8 +75,18 @@ public final class KeyboardView extends View {
     private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     public KeyboardView(Context context, Sender sender) {
+        this(context, sender, true);
+    }
+
+    /**
+     * @param physicalKeys true when the peer takes Windows scan codes (Map mode). The chatty
+     *     alternative types one character per message and cannot hold a key down, so chords and
+     *     held keys only work through this path.
+     */
+    public KeyboardView(Context context, Sender sender, boolean physicalKeys) {
         super(context);
         this.sender = sender;
+        this.physicalKeys = physicalKeys;
         stroke.setStyle(Paint.Style.STROKE);
         text.setTextAlign(Paint.Align.CENTER);
         buildRows();
@@ -250,14 +264,76 @@ public final class KeyboardView extends View {
 
     private void sendDown(Key k) {
         if (sender == null) return;
-        sender.send(k.kind == KIND_CONTROL
-                ? InputMessages.controlKey(k.control, true)
-                : InputMessages.unicode(k.chr));
+        if (k.kind == KIND_CONTROL) {
+            sender.send(InputMessages.controlKey(k.control, true, heldModifiers(k)));
+            return;
+        }
+        int code = physicalKeys ? ScanCodes.of(k.chr) : 0;
+        if (code == 0) {
+            sender.send(InputMessages.unicode(k.chr));
+            return;
+        }
+        // An uppercase letter or a shifted symbol needs Shift held on the peer, and the user is
+        // not holding it here: press it for the lifetime of this key.
+        boolean shift = ScanCodes.needsShift(k.chr) && !isShiftHeld();
+        java.util.List<ControlKey> held = heldModifiers(k);
+        if (shift) {
+            sender.send(InputMessages.controlKey(ControlKey.Shift, true, held));
+            shiftedByUs.add(k);
+            held.add(ControlKey.Shift);
+        }
+        sender.send(InputMessages.keyPosition(code, true, held));
     }
 
     private void sendUp(Key k) {
-        if (sender == null || k.kind != KIND_CONTROL) return;
-        sender.send(InputMessages.controlKey(k.control, false));
+        if (sender == null) return;
+        if (k.kind == KIND_CONTROL) {
+            sender.send(InputMessages.controlKey(k.control, false, heldModifiers(k)));
+            return;
+        }
+        int code = physicalKeys ? ScanCodes.of(k.chr) : 0;
+        if (code == 0) return;
+        sender.send(InputMessages.keyPosition(code, false, heldModifiers(k)));
+        if (shiftedByUs.remove(k)) {
+            sender.send(InputMessages.controlKey(ControlKey.Shift, false, heldModifiers(k)));
+        }
+    }
+
+    /**
+     * The modifiers currently held by other fingers.
+     *
+     * <p>The host drops any modifier that a key-down event does not list (it calls
+     * {@code release_unpressed_modifiers} first), so every event has to carry the whole set,
+     * otherwise pressing Shift would release a held Win key and no chord could ever form.
+     */
+    private java.util.List<ControlKey> heldModifiers(Key exclude) {
+        java.util.List<ControlKey> held = new java.util.ArrayList<>();
+        for (int i = 0; i < heldByPointer.size(); i++) {
+            Key other = heldByPointer.valueAt(i);
+            if (other == null || other == exclude || other.kind != KIND_CONTROL) continue;
+            switch (other.control) {
+                case Shift:
+                case Control:
+                case Alt:
+                case Meta:
+                    held.add(other.control);
+                    break;
+                default:
+                    break;
+            }
+        }
+        return held;
+    }
+
+    /** @return true while one of the fingers is on a Shift key */
+    private boolean isShiftHeld() {
+        for (int i = 0; i < heldByPointer.size(); i++) {
+            Key held = heldByPointer.valueAt(i);
+            if (held != null && held.kind == KIND_CONTROL && held.control == ControlKey.Shift) {
+                return true;
+            }
+        }
+        return false;
     }
 }
 
