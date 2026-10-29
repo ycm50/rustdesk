@@ -573,6 +573,13 @@ public final class HostSession implements Runnable {
                 case KEY_EVENT:
                     handleKeyEvent(message.getKeyEvent());
                     break;
+                case TEST_DELAY:
+                    // The viewer probes the link while the screen is static; echoing keeps its
+                    // watchdog from treating a quiet but healthy session as a dead one.
+                    send(secure, Message.newBuilder()
+                            .setTestDelay(message.getTestDelay())
+                            .build());
+                    break;
                 case CLIPBOARD:
                 case MULTI_CLIPBOARDS:
                     handleClipboard(message);

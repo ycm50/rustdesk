@@ -33,7 +33,10 @@ fn clean_startup_reaches_the_cap_without_waiting_for_slow_growth() {
                     let fps = qos.fps();
                     assert!(fps <= cap);
                     if n == 1 {
-                        assert!(fps <= INIT_FPS.min(cap), "keep the first-second guard");
+                        assert!(
+                            fps >= VideoQoS::fps_floor(cap),
+                            "the 75% floor applies from the first reply"
+                        );
                     }
                     trace.push(fps);
                 }

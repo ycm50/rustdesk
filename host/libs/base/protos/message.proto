@@ -695,6 +695,9 @@ message OptionMessage {
   BoolOption disable_camera = 17;
   BoolOption terminal_persistent = 18;
   BoolOption show_my_cursor = 19;
+  // Percent of the captured frame size to encode and transmit (1-100, 0/unset = native).
+  // The controlled desktop keeps its own resolution; only the stream is scaled.
+  uint32 custom_video_scale = 20;
 }
 
 message TestDelay {

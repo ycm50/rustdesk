@@ -46,6 +46,10 @@ public final class WsTransport implements Transport {
         OkHttpClient client = new OkHttpClient.Builder()
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
+                // Tunnels and relays reclaim a connection that stays idle, so ping at the
+                // WebSocket layer as a fallback; a read timeout stays disabled because
+                // silent stretches between frames are expected.
+                .pingInterval(15, TimeUnit.SECONDS)
                 .writeTimeout(15, TimeUnit.SECONDS)
                 .build();
         Request request = new Request.Builder().url(url).build();

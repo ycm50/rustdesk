@@ -12,9 +12,10 @@
     processes instead of one per suite:
 
       A  protobuf only        TerminalMsgTest, ClipSyncTest, FileMsgTest, KbSelfTest,
-                              IdCheckTest
-      B  protobuf + bcprov    crypto.SelfTest, HostSessionTest, PeerHandshakeInteropTest,
-                              Ed25519Test, LoopbackTest (and RelayTest with -IncludeNetwork)
+                              IdCheckTest, VideoSettingsTest
+      B  protobuf + bcprov    crypto.SelfTest, HostSessionTest, TransportOrderTest,
+                              PeerHandshakeInteropTest, Ed25519Test, LoopbackTest
+                              (and RelayTest with -IncludeNetwork)
 
     LoopbackTest lives in group B because it signs the fake host's SignedId with
     BouncyCastle directly; it cannot compile against protobuf alone.
@@ -259,7 +260,8 @@ $groups = [ordered]@{
             'com\rustdesk\java\session\ClipboardMessages.java',
             'com\rustdesk\java\session\FileMessages.java',
             'com\rustdesk\java\session\InputMessages.java',
-            'com\rustdesk\java\session\TerminalMessages.java'
+            'com\rustdesk\java\session\TerminalMessages.java',
+            'com\rustdesk\java\session\VideoSettings.java'
         )
         Excluded     = @()
         HelperSources = @('PeerIdRules.java')   # suite-local helper, never a suite itself
@@ -338,6 +340,15 @@ $suites = @(
         PassPattern = $passAll
     },
     [pscustomobject]@{
+        Group       = 'A'
+        Name        = 'VideoSettingsTest'
+        Main        = 'com.rustdesk.java.selftest.VideoSettingsTest'
+        Source      = Join-Path $SuiteDir 'VideoSettingsTest.java'
+        Network     = $false
+        Arguments   = { @() }
+        PassPattern = $passAll
+    },
+    [pscustomobject]@{
         Group       = 'B'
         Name        = 'crypto.SelfTest'
         Main        = 'com.rustdesk.java.crypto.SelfTest'
@@ -351,6 +362,15 @@ $suites = @(
         Name        = 'HostSessionTest'
         Main        = 'com.rustdesk.java.selftest.HostSessionTest'
         Source      = Join-Path $SuiteDir 'HostSessionTest.java'
+        Network     = $false
+        Arguments   = { @() }
+        PassPattern = $passAll
+    },
+    [pscustomobject]@{
+        Group       = 'B'
+        Name        = 'TransportOrderTest'
+        Main        = 'com.rustdesk.java.selftest.TransportOrderTest'
+        Source      = Join-Path $SuiteDir 'TransportOrderTest.java'
         Network     = $false
         Arguments   = { @() }
         PassPattern = $passAll

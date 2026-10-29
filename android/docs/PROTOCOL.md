@@ -339,6 +339,35 @@ displayHeight)` 带上登录阶段拿到的真实分辨率，再逐帧 `queueFra
   `VideoFrame.display` 取值与选屏（当前只处理 `displays[0]`，其余 display 的帧也解到同一个 Surface）。
   来源：net/Session.java:308-318,329-357；codec/VideoDecoder.java:32-33；../README.md
 
+### 8.1 帧率、传输分辨率与画质（主控端 → 被控端）
+
+用既有消息控制被控端出帧，**不改变被控端桌面分辨率**：
+
+| 参数 | 消息 | 被控端行为 |
+| --- | --- | --- |
+| 帧率 | 登录 `LoginRequest.option.custom_fps`；运行中 `Misc.option.custom_fps` | Rust host 写入 `VideoQoS`，是上限而非保证值 |
+| 传输分辨率 | `OptionMessage.custom_video_scale`（1–100 百分比，0=未设置） | host 把编码器宽高按比例缩小后编码发送；捕获与桌面分辨率不变 |
+| 画质 | `OptionMessage.image_quality`（Low/Balanced/Best） | host 用它设定位率/质量比（0.5 / 0.67 / 1.5）；帧率不再由画质决定 |
+
+- 手机端：`session/VideoSettings.java` 构造消息；`Session.setVideoFps` / `Session.setVideoScale` / `Session.setVideoQuality` 发送。重连登录后会自动重放比例与画质（登录包 + `handleLoginResponse`）。
+- QoS：请求的 fps 是目标，**任何分辨率、任何画质下，实际帧率不低于该值的 75%**（`fps_floor`）。链路变差时优先降位率/画质，不再把帧率降到 75% 以下；启动即从该下限开始。
+- 切换画质或 fps 会清空当前目标，让控制器重新收敛。
+- host 端：`VideoQoS` 按 viewer 记录比例并取最小值（多路观看时以最省带宽的一路为准）。只有软件编码器（VP8/VP9/AV1）应用缩放；H.264/H.265 的 HWRAM/VRAM 路径与 I444 保持原生尺寸（缩放输入尺寸会破坏编码器约定）。
+- 缩放实现：捕获帧先在原生尺寸转 I420，再用 libyuv `I420Scale` 缩到目标尺寸（`scrap/common/convert.rs`）；只在**下采样**时启用。
+- 比例变化通过现有 `SWITCH` 机制重建编码器；帧率与比例都是“请求值”，实际受带宽/QoS/平台限制。
+- 桌面分辨率仍由 host 自己的显示设置决定；本功能不再发送 `Misc.change_display_resolution`。
+- 静止画面保底：静态刷新的重复帧爆发结束后，被控端**每秒至少重编一帧**（`IDLE_KEEPALIVE_INTERVAL`），避免画面不变时对端把静默当成链路失效。
+
+### 8.2 长连接保活与重连
+
+- 心跳复用 `TestDelay`：主控端每 5 s 发 `from_client=true` 的探测；接收方回送同一条消息。收到 `from_client=true` 只刷新入站时间、不再回送（避免乒乓）；`from_client=false` 的 host 探测仍原样回送。
+- 看门狗：登录后启动守护线程，25 s 无任何入站消息即关闭底层 transport，由重连循环接管。
+- 重连：首次连接最多 3 次（1.5 s×n）；成功登录过之后无限重连，退避 1/2/4/8/15 s + 0–250 ms 抖动。登录被拒、收到 `Misc.close_reason`、协议错误超限才算终止。
+- 发送只有一条线程：`Session.enqueue` 把消息放进容量 256 的 outbox，由绑定当前 transport 的 sender 线程写出。`net.SecureTransport.send` 是 synchronized 的（加密推进 nonce，必须与写帧原子），否则并发写会在对端表现为 MAC 失败并断链。
+- WebSocket 隧道：OkHttp `pingInterval=15s`；直连 TCP 开启 `SO_KEEPALIVE`。
+- 安卓被控端 `HostSession.receiveLoop` 同样回送 `TestDelay`，避免主控端在静止画面时误判掉线。
+
+
 ## 9. 踩过的坑清单
 
 ### 9.1 BouncyCastle `verifySignature()` 只吃 64 字节签名

@@ -13,6 +13,9 @@ import com.rustdesk.java.session.ClipboardMessages;
 import com.rustdesk.java.session.DeviceIdentity;
 import com.rustdesk.java.session.InputMessages;
 import com.rustdesk.java.session.Session;
+import com.rustdesk.java.session.VideoSettings;
+
+import hbb.MessageOuterClass.ImageQuality;
 
 import hbb.MessageOuterClass.ControlKey;
 import hbb.MessageOuterClass.Message;
@@ -81,6 +84,10 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
     private boolean firstFrameLogged;
     /** Session owning the counters above, so a reconnect starts with a clean baseline. */
     private Session lastStatsSession;
+    /** Receive rate shown on the status line, refreshed every {@link #STATS_INTERVAL_MS}. */
+    private int currentFps;
+    private long lastFpsFrames;
+    private long lastFpsUptime;
 
     private final android.os.Handler uiHandler =
             new android.os.Handler(android.os.Looper.getMainLooper());
@@ -99,7 +106,16 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
                     lastStatsSession = current;
                     lastLoggedFrames = 0L;
                     lastStatsLogUptime = 0L;
+                    lastFpsFrames = 0L;
+                    lastFpsUptime = 0L;
+                    currentFps = 0;
                 }
+                long nowFps = android.os.SystemClock.uptimeMillis();
+                if (lastFpsUptime > 0L && nowFps > lastFpsUptime) {
+                    currentFps = (int) ((frames - lastFpsFrames) * 1000L / (nowFps - lastFpsUptime));
+                }
+                lastFpsFrames = frames;
+                lastFpsUptime = nowFps;
                 if (!firstFrameLogged && frames > 0L) {
                     firstFrameLogged = true;
                     android.util.Log.i("RDJAVA", "first frame received");
@@ -129,6 +145,9 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // A remote session is expected to stay up for a long time: once the display sleeps the
+        // app is suspended and its socket eventually dies, which looks like a dropped session.
+        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         FrameLayout root = new FrameLayout(this);
         remoteView = new RemoteView(this);
@@ -232,6 +251,11 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
         reconnect.setText("\u27F3");
         reconnect.setOnClickListener(v -> reconnectSession());
         topButtons.addView(reconnect);
+
+        android.widget.Button videoSettings = new android.widget.Button(this);
+        videoSettings.setText("\u2699");
+        videoSettings.setOnClickListener(v -> showVideoSettings());
+        topButtons.addView(videoSettings);
 
         android.widget.Button keyboardToggle = new android.widget.Button(this);
         keyboardToggle.setText("\u2328");
@@ -423,6 +447,7 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
         if (identity == null) identity = DeviceIdentity.load(this);
         session = new Session(id, getIntent().getStringExtra(EXTRA_PASSWORD), server,
                 21116, identity, decoder, this);
+        session.setVideoSettings(new VideoSettings(loadFps(), loadScale(), loadQuality()));
         session.start();
     }
 
@@ -452,7 +477,61 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
         android.util.Log.i("RDJAVA", "manual reconnect to " + id);
         session = new Session(id, getIntent().getStringExtra(EXTRA_PASSWORD), server,
                 21116, identity, decoder, this);
+        // Same persisted settings as the first connect; a fresh Session starts with defaults.
+        session.setVideoSettings(new VideoSettings(loadFps(), loadScale(), loadQuality()));
         session.start();
+    }
+
+    // --- video settings: frame rate, transmitted stream size and image quality ---
+
+    /** Opens the picker with the session's current values and the captured desktop size. */
+    private void showVideoSettings() {
+        Session current = session;
+        VideoSettings settings = current == null ? VideoSettings.defaults()
+                : current.getVideoSettings();
+        VideoSettingsDialog.show(this, settings, peerWidth, peerHeight, this::applyVideoSettings);
+    }
+
+    /** Stores the choice and pushes it to the live session. */
+    private void applyVideoSettings(int fps, int scalePercent, ImageQuality quality) {
+        getSharedPreferences("rustdesk_java_prefs", MODE_PRIVATE)
+                .edit()
+                .putInt("video_fps", fps)
+                .putInt("video_scale", scalePercent)
+                .putInt("video_quality", quality.getNumber())
+                .apply();
+        Session current = session;
+        if (current != null) {
+            current.setVideoFps(fps);
+            current.setVideoScale(scalePercent);
+            current.setVideoQuality(quality);
+        }
+        android.util.Log.i("RDJAVA", "video settings: fps=" + fps
+                + " scale=" + scalePercent + "% quality=" + quality);
+        pinStatus("video settings sent");
+    }
+
+    private int loadFps() {
+        return getSharedPreferences("rustdesk_java_prefs", MODE_PRIVATE)
+                .getInt("video_fps", VideoSettings.DEFAULT_FPS);
+    }
+
+    private int loadScale() {
+        return getSharedPreferences("rustdesk_java_prefs", MODE_PRIVATE)
+                .getInt("video_scale", VideoSettings.NATIVE_SCALE);
+    }
+
+    private ImageQuality loadQuality() {
+        int value = getSharedPreferences("rustdesk_java_prefs", MODE_PRIVATE)
+                .getInt("video_quality", ImageQuality.Balanced.getNumber());
+        switch (value) {
+            case 2:
+                return ImageQuality.Low;
+            case 4:
+                return ImageQuality.Best;
+            default:
+                return ImageQuality.Balanced;
+        }
     }
 
     private int dp(int value) {
@@ -483,7 +562,7 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
         long frames = current == null ? 0L : current.getFramesReceived();
         long bytes = current == null ? 0L : current.getBytesReceived();
         return platform + " " + peerWidth + "x" + peerHeight
-                + " | n/a fps / " + frames + " \u5e27 / " + (bytes / 1024L) + " KB";
+                + " | " + currentFps + " fps / " + frames + " \u5e27 / " + (bytes / 1024L) + " KB";
     }
 
     // --- clipboard uplink ---

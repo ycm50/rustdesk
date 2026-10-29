@@ -52,7 +52,10 @@ pub const FPS: u32 = 30;
 pub const MIN_FPS: u32 = 1;
 pub const MAX_FPS: u32 = 120;
 pub const INIT_FPS: u32 = 15;
-const MIN_AUTO_FPS: u32 = 5;
+const MIN_FPS_PERCENT: u32 = 75;
+// Encoded video size limits, as a percentage of the captured size.
+const MIN_VIDEO_SCALE: u32 = 10;
+const MAX_VIDEO_SCALE: u32 = 100;
 
 // Bitrate ratio constants for different quality levels
 const BR_MAX: f32 = 40.0; // 2000 * 2 / 100
@@ -262,6 +265,7 @@ impl UserDelay {
 struct UserData {
     auto_adjust_fps: Option<u32>, // reserve for compatibility
     custom_fps: Option<u32>,
+    scale: Option<u32>, // encoded size as a percentage of the captured size
     quality: Option<(i64, Quality)>, // (time, quality)
     delay: UserDelay,
     record: bool,
@@ -420,6 +424,9 @@ impl VideoQoS {
         }
         if let Some(user) = self.users.get_mut(&id) {
             user.custom_fps = Some(fps);
+            // A raised or lowered cap must take effect without waiting for the old target to
+            // creep there; the delay samples re-ramp from the start-up rate.
+            user.delay.fps = None;
         }
     }
 
@@ -432,7 +439,36 @@ impl VideoQoS {
         }
     }
 
-    pub fn user_image_quality(&mut self, id: i32, image_quality: i32) {
+    // The encoded size this viewer asked for, as a percentage of the captured size.
+    pub fn user_video_scale(&mut self, id: i32, percent: u32) {
+        let percent = percent.clamp(MIN_VIDEO_SCALE, MAX_VIDEO_SCALE);
+        if let Some(user) = self.users.get_mut(&id) {
+            user.scale = Some(percent);
+        }
+    }
+
+    // Scale to encode at, the smallest over all viewers; 1.0 when nobody asked for one.
+    pub fn scale(&self) -> f32 {
+        let percent = self
+            .users
+            .values()
+            .filter_map(|user| user.scale)
+            .min()
+            .unwrap_or(MAX_VIDEO_SCALE);
+        (percent as f32 / 100.0).clamp(
+            MIN_VIDEO_SCALE as f32 / 100.0,
+            MAX_VIDEO_SCALE as f32 / 100.0,
+        )
+    }
+
+    /// Lowest frame rate the adaptive controller may produce: 75% of the viewer's setting,
+    /// independent of quality and encoded resolution. A congested link gives up bitrate first.
+    fn fps_floor(cap: u32) -> u32 {
+        let cap = cap.max(1);
+        ((cap * MIN_FPS_PERCENT) / 100).max(1).min(cap)
+    }
+
+pub fn user_image_quality(&mut self, id: i32, image_quality: i32) {
         let convert_quality = |q: i32| -> Quality {
             if q == ImageQuality::Balanced.value() {
                 Quality::Balanced
@@ -446,12 +482,17 @@ impl VideoQoS {
             }
         };
 
-        let quality = Some((hbb_common::get_time(), convert_quality(image_quality)));
+        let converted = convert_quality(image_quality);
+        let quality = Some((hbb_common::get_time(), converted));
         if let Some(user) = self.users.get_mut(&id) {
             user.quality = quality;
-            // update ratio directly
-            self.ratio = self.latest_quality().ratio();
+            // Re-ramp from the start-up rate: the new quality has a different floor, so the
+            // controller has to settle again rather than inherit the old quality's rate.
+            user.delay.fps = None;
+            user.delay.stall_reference_fps = None;
         }
+        // update ratio directly
+        self.ratio = self.latest_quality().ratio();
     }
 
     pub fn user_record(&mut self, id: i32, v: bool) {
@@ -461,19 +502,19 @@ impl VideoQoS {
     }
 
     pub fn user_network_delay(&mut self, id: i32, delay: u32) {
-        let target_ratio = self.latest_quality().ratio();
         // Fewer frames only save bytes with encoders that size frames for a fixed rate;
         // bitrate-targeted encoders keep the bitrate, so the bitrate has to come down first.
         let bitrate_first = self.can_reduce_bitrate();
 
-        // For bad network, small fps means quick reaction and high quality
-        let (min_fps, normal_fps) = if target_ratio >= BR_BEST {
-            (8, 16)
-        } else if target_ratio >= BR_BALANCED {
-            (10, 20)
-        } else {
-            (12, 24)
-        };
+        // The viewer's requested fps is the ceiling; the floor stays at 75% of it regardless
+        // of quality or encoded resolution, so a bad link lowers bitrate before frame rate.
+        let user_cap = self
+            .users
+            .get(&id)
+            .map(|u| u.fps_cap())
+            .unwrap_or(FPS);
+        let min_fps = Self::fps_floor(user_cap);
+        let normal_fps = user_cap;
 
         // Calculate minimum acceptable delay-fps product
         let dividend_ms = DELAY_THRESHOLD_150MS * min_fps;
@@ -496,7 +537,7 @@ impl VideoQoS {
             // by its own limit.  The stream follows the slowest viewer in adjust_fps;
             // neither that minimum nor another viewer's limit feeds back into it.
             let user_cap = user.fps_cap();
-            let current_fps = user.delay.fps.unwrap_or(INIT_FPS.min(user_cap));
+            let current_fps = user.delay.fps.unwrap_or(Self::fps_floor(user_cap));
             let mut fps = current_fps;
 
             // Adaptive FPS adjustment based on network delay:
@@ -556,7 +597,7 @@ impl VideoQoS {
                 // While the bitrate can still come down, the frame rate keeps its floor.
                 fps = fps.max(min_fps);
             }
-            fps = fps.max(MIN_AUTO_FPS.min(user_cap));
+            fps = fps.max(Self::fps_floor(user_cap));
             fps = user
                 .delay
                 .limit_fps_change(current_fps, fps, delay, bitrate_first, braked);
@@ -611,7 +652,7 @@ impl VideoQoS {
         let reference = match user.delay.stall_reference_fps {
             Some(reference) => reference,
             None => {
-                let reference = user.delay.fps.unwrap_or(INIT_FPS.min(user.fps_cap()));
+                let reference = user.delay.fps.unwrap_or(Self::fps_floor(user.fps_cap()));
                 user.delay.stall_reference_fps = Some(reference);
                 user.delay.on_reduction(reference);
                 reference
@@ -619,11 +660,12 @@ impl VideoQoS {
         };
         let divisor = 1u32 << ((elapsed / 1000) as u32).saturating_sub(1).min(5);
         let user_cap = user.fps_cap();
-        // The floor is a floor, not a lift: a target already below it stays.
+        let floor = Self::fps_floor(user_cap);
         let current = user.delay.fps.unwrap_or(reference);
         let fps = (reference / divisor)
-            .clamp(MIN_AUTO_FPS.min(user_cap), user_cap)
-            .min(current);
+            .clamp(floor, user_cap)
+            .min(current)
+            .max(floor);
         user.delay.fps = Some(fps);
         log::trace!(
             "qos_trace t={} id={id} timeout={elapsed} fps={fps}",
@@ -817,22 +859,16 @@ impl VideoQoS {
     // Adjust fps based on network delay and user response time
     fn adjust_fps(&mut self) {
         let highest_fps = self.highest_fps();
-        // Get minimum fps from all users
-        let mut fps = self
+        // The stream follows the slowest viewer, but never drops below 75% of the weakest
+        // requested cap: the floor applies from the first frame and across resolutions.
+        let floor = Self::fps_floor(highest_fps);
+        let fps = self
             .users
-            .iter()
-            .map(|u| u.1.delay.fps.unwrap_or(INIT_FPS))
+            .values()
+            .map(|u| u.delay.fps.unwrap_or(Self::fps_floor(u.fps_cap())))
             .min()
-            .unwrap_or(INIT_FPS);
-
-        // Every viewer inside its first second keeps the stream at INIT_FPS to
-        // ensure stability; each viewer carries its own start-up clock.
-        if self.users.values().any(|u| {
-            u.joined_at
-                .is_some_and(|joined| self.since(joined).as_secs() < 1)
-        }) {
-            fps = fps.min(INIT_FPS);
-        }
+            .unwrap_or(highest_fps)
+            .max(floor);
 
         // Ensure fps stays within valid range
         self.fps = fps.clamp(MIN_FPS, highest_fps);

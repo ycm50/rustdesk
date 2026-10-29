@@ -25,7 +25,15 @@ pub fn convert_to_yuv(
     let src_pixfmt = captured.pixfmt();
     let src_width = captured.width();
     let src_height = captured.height();
-    if src_width > dst_fmt.w || src_height > dst_fmt.h {
+    // A smaller I420 target means the encoder was created for a scaled-down stream; that is
+    // converted after the source layout has been validated below. Growing or a non-I420 target
+    // keeps the original error.
+    let downscale = src_width > dst_fmt.w || src_height > dst_fmt.h;
+    if downscale
+        && !(dst_fmt.pixfmt == crate::Pixfmt::I420
+            && src_width >= dst_fmt.w
+            && src_height >= dst_fmt.h)
+    {
         bail!(
             "src rect > dst rect: ({src_width}, {src_height}) > ({},{})",
             dst_fmt.w,
@@ -52,6 +60,18 @@ pub fn convert_to_yuv(
                 src_height
             );
         }
+    }
+    if downscale && dst_fmt.pixfmt == crate::Pixfmt::I420 {
+        return convert_to_i420_scaled(
+            src,
+            &src_stride,
+            src_pixfmt,
+            src_width,
+            src_height,
+            &dst_fmt,
+            dst,
+            mid_data,
+        );
     }
     let align = |x: usize| (x + 63) / 64 * 64;
     let unsupported = format!(
@@ -198,6 +218,110 @@ pub fn convert_to_yuv(
     Ok(())
 }
 
+// Converts a captured frame at its own size to I420, then lets libyuv scale it down to the
+// encoder's size. Only the BGRA/RGBA/RGB565 sources and an I420 target are handled here; any
+// other combination keeps the caller's error.
+#[cfg(not(target_os = "ios"))]
+fn convert_to_i420_scaled(
+    src: &[u8],
+    src_stride: &[usize],
+    src_pixfmt: crate::Pixfmt,
+    src_width: usize,
+    src_height: usize,
+    dst_fmt: &EncodeYuvFormat,
+    dst: &mut Vec<u8>,
+    mid_data: &mut Vec<u8>,
+) -> ResultType<()> {
+    let align = |x: usize| (x + 63) / 64 * 64;
+    let mid_stride_y = align(src_width);
+    let mid_stride_uv = align((src_width + 1) / 2);
+    let mid_u = mid_stride_y * src_height;
+    let mid_v = mid_u + mid_stride_uv * ((src_height + 1) / 2);
+    mid_data.resize(mid_v + mid_stride_uv * ((src_height + 1) / 2), 0);
+
+    let mid_y_ptr = mid_data.as_mut_ptr();
+    let mid_u_ptr = mid_data[mid_u..].as_mut_ptr();
+    let mid_v_ptr = mid_data[mid_v..].as_mut_ptr();
+    let unsupported = format!(
+        "unsupported pixfmt conversion: {src_pixfmt:?} -> {:?}",
+        dst_fmt.pixfmt
+    );
+
+    match src_pixfmt {
+        crate::Pixfmt::BGRA | crate::Pixfmt::RGBA => {
+            let f = if src_pixfmt == crate::Pixfmt::BGRA {
+                ARGBToI420
+            } else {
+                ABGRToI420
+            };
+            call_yuv!(f(
+                src.as_ptr(),
+                src_stride[0] as _,
+                mid_y_ptr,
+                mid_stride_y as _,
+                mid_u_ptr,
+                mid_stride_uv as _,
+                mid_v_ptr,
+                mid_stride_uv as _,
+                src_width as _,
+                src_height as _,
+            ));
+        }
+        crate::Pixfmt::RGB565LE => {
+            // dst doubles as the ARGB scratch buffer here; it is resized again below.
+            let argb_stride = src_width * 4;
+            dst.resize(argb_stride * src_height, 0);
+            call_yuv!(RGB565ToARGB(
+                src.as_ptr(),
+                src_stride[0] as _,
+                dst.as_mut_ptr(),
+                argb_stride as _,
+                src_width as _,
+                src_height as _,
+            ));
+            call_yuv!(ARGBToI420(
+                dst.as_ptr(),
+                argb_stride as _,
+                mid_y_ptr,
+                mid_stride_y as _,
+                mid_u_ptr,
+                mid_stride_uv as _,
+                mid_v_ptr,
+                mid_stride_uv as _,
+                src_width as _,
+                src_height as _,
+            ));
+        }
+        _ => bail!(unsupported),
+    }
+
+    let dst_stride_y = dst_fmt.stride[0];
+    let dst_stride_uv = dst_fmt.stride[1];
+    dst.resize(dst_fmt.h * dst_stride_y * 2, 0); // same layout guard as the equal-size path
+    let dst_y = dst.as_mut_ptr();
+    let dst_u = dst[dst_fmt.u..].as_mut_ptr();
+    let dst_v = dst[dst_fmt.v..].as_mut_ptr();
+    call_yuv!(I420Scale(
+        mid_y_ptr,
+        mid_stride_y as _,
+        mid_u_ptr,
+        mid_stride_uv as _,
+        mid_v_ptr,
+        mid_stride_uv as _,
+        src_width as _,
+        src_height as _,
+        dst_y,
+        dst_stride_y as _,
+        dst_u,
+        dst_stride_uv as _,
+        dst_v,
+        dst_stride_uv as _,
+        dst_fmt.w as _,
+        dst_fmt.h as _,
+        FilterMode::kFilterBilinear
+    ));
+    Ok(())
+}
 #[cfg(not(target_os = "ios"))]
 pub fn convert(captured: &PixelBuffer, pixfmt: crate::Pixfmt, dst: &mut Vec<u8>) -> ResultType<()> {
     if captured.pixfmt() == pixfmt {

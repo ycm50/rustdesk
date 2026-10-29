@@ -16,6 +16,9 @@ const INITIAL_REPEAT_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_REPEAT_FPS: u32 = 30;
 const MAX_REPEAT_FAILURES: usize = 3;
 const MAX_REPEAT_NO_OUTPUTS: usize = 100;
+// After the short repeat burst, keep one frame per second flowing even when the screen is
+// static: the far side treats a silent stream as a dead link and its input path stalls.
+const IDLE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HardwareBackend {
@@ -194,6 +197,11 @@ impl<'a> StaticRefresh<'a> {
             quality,
             self.hardware_backend,
         ));
+        #[cfg(not(test))]
+        let elapsed = self.last_encode.elapsed();
+        #[cfg(test)]
+        let elapsed = self.elapsed_since_encode;
+        let past_repeat_limit = self.repeat_output_counter >= self.repeat_output_limit;
         if !self.source.is_monitor()
             || self.codec_format == CodecFormat::AV1
             || !self.source_ready
@@ -203,13 +211,12 @@ impl<'a> StaticRefresh<'a> {
                     CodecFormat::VP8 | CodecFormat::VP9 | CodecFormat::AV1
                 ))
             || self.repeat_no_outputs >= MAX_REPEAT_NO_OUTPUTS
-            || self.repeat_output_counter >= self.repeat_output_limit
             || {
-                #[cfg(not(test))]
-                let elapsed = self.last_encode.elapsed();
-                #[cfg(test)]
-                let elapsed = self.elapsed_since_encode;
-                let interval = if matches!(self.codec_format, CodecFormat::VP8 | CodecFormat::VP9)
+                let interval = if past_repeat_limit {
+                    // The short burst that drains encoder latency is over; from now on keep a
+                    // heartbeat frame per second so the peer never sees a silent stream.
+                    IDLE_KEEPALIVE_INTERVAL
+                } else if matches!(self.codec_format, CodecFormat::VP8 | CodecFormat::VP9)
                     || (self.repeat_output_counter == 0 && self.repeat_no_outputs == 0)
                 {
                     INITIAL_REPEAT_INTERVAL.max(spf)
@@ -433,15 +440,20 @@ mod tests {
         }
         assert_eq!(calls.get(), limit);
 
-        refresh.elapsed_since_encode = Duration::from_secs(600);
+        // After the burst one heartbeat frame per second keeps the stream alive.
+        refresh.elapsed_since_encode = Duration::from_millis(500);
         attempt(&mut refresh, &calls, &[1], spf);
         assert_eq!(calls.get(), limit);
+        refresh.elapsed_since_encode = Duration::from_secs(1);
+        attempt(&mut refresh, &calls, &[1], spf);
+        assert_eq!(calls.get(), limit + 1);
 
+        // A new frame restarts the whole repeat budget.
         refresh.on_frame(&EncodeInput::YUV(&[1]));
         refresh.on_encoded(true);
         refresh.elapsed_since_encode = Duration::from_secs(1);
         attempt(&mut refresh, &calls, &[1], spf);
-        assert_eq!(calls.get(), limit + 1);
+        assert_eq!(calls.get(), limit + 2);
     }
 
     #[test]
@@ -579,7 +591,7 @@ mod tests {
         };
         refresh.on_frame(&EncodeInput::YUV(&[1]));
         refresh.on_encoded(true);
-        for _ in 0..=expected {
+        for _ in 0..expected {
             refresh.elapsed_since_encode = Duration::from_secs(1);
             refresh
                 .try_encode(
@@ -616,13 +628,16 @@ mod tests {
         let mut encoder = Encoder {
             codec: Box::new(CountingEncoder(Rc::new(Cell::new(0)))),
         };
-        for (new_frame, quality, attempts, expected) in [
+        // Every attempt advances the clock by a second, so after the repeat burst the 1 fps
+    // heartbeat still produces exactly one frame per attempt. The expected values are the
+    // running totals the subscriber must see.
+    for (new_frame, quality, attempts, expected) in [
             (true, BR_BALANCED, 11, 11),
-            (false, BR_BEST, 20, 20),
-            (false, 0.1, 50, 50),
-            (false, BR_BEST, 50, 50),
-            (false, 0.1, 50, 50),
-            (true, BR_BEST, 20, 60),
+            (false, BR_BEST, 20, 31),
+            (false, 0.1, 50, 81),
+            (false, BR_BEST, 50, 131),
+            (false, 0.1, 50, 181),
+            (true, BR_BEST, 20, 201),
         ] {
             if new_frame {
                 refresh.on_frame(&EncodeInput::YUV(&[1]));

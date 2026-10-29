@@ -19,7 +19,10 @@ public class SecureTransport implements Transport {
     }
 
     @Override
-    public void send(byte[] payload) throws IOException {
+    public synchronized void send(byte[] payload) throws IOException {
+        // seal() advances the nonce counter, so encrypting and handing the frame to the delegate
+        // must be one atomic step; otherwise concurrent callers emit frames with out-of-order
+        // nonces and the peer drops the connection.
         delegate.send(cipher.seal(payload));
     }
 

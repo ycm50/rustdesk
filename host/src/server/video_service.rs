@@ -690,6 +690,10 @@ fn run(vs: VideoService) -> ResultType<()> {
             )?
         }
     };
+    // Only the VP8/VP9/AV1 software encoders take a scaled input; the H.264/H.265
+    // hardware paths keep the captured size, so a scale request must not restart them.
+    let scale_tracks = !use_i444
+        && matches!(&encoder_cfg, EncoderCfg::VPX(_) | EncoderCfg::AOM(_));
     #[cfg(feature = "vram")]
     c.set_output_texture(encoder.input_texture());
     #[cfg(target_os = "android")]
@@ -733,6 +737,9 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut encoder_warmed_up = false;
     let capture_width = c.width;
     let capture_height = c.height;
+    // The encoder may emit a scaled-down stream; recordings must carry the encoded size.
+    let (encode_width, encode_height) =
+        encoder_size(&encoder_cfg).unwrap_or((capture_width, capture_height));
     let mut static_refresh = static_refresh::StaticRefresh::new(
         vs.source,
         codec_format,
@@ -746,6 +753,16 @@ fn run(vs: VideoService) -> ResultType<()> {
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
 
     while sp.ok() {
+        if scale_tracks {
+            let wanted = VIDEO_QOS.lock().unwrap().scale();
+            let (wanted_width, wanted_height) = scaled_size(capture_width, capture_height, wanted);
+            if encoder_size(&encoder_cfg) != Some((wanted_width, wanted_height)) {
+                log::info!(
+                    "switch to change video scale, wanted {wanted_width}x{wanted_height}"
+                );
+                bail!("SWITCH");
+            }
+        }
         #[cfg(windows)]
         check_uac_switch(c.privacy_mode_id, c._capturer_privacy_mode_id)?;
         check_qos(
@@ -878,8 +895,8 @@ fn run(vs: VideoService) -> ResultType<()> {
                         &mut encode_fail_counter,
                         &mut first_frame,
                         &mut encoder_warmed_up,
-                        capture_width,
-                        capture_height,
+                        encode_width,
+                        encode_height,
                     )?;
                     static_refresh.on_frame_encoded(&result);
                     frame_controller.set_send(now, result.send_conn_ids);
@@ -944,8 +961,8 @@ fn run(vs: VideoService) -> ResultType<()> {
                             &mut encode_fail_counter,
                             &mut first_frame,
                             &mut encoder_warmed_up,
-                            capture_width,
-                            capture_height,
+                            encode_width,
+                            encode_height,
                         )?
                         .send_conn_ids;
                         static_refresh.on_encoded(!send_conn_ids.is_empty());
@@ -1080,18 +1097,24 @@ fn setup_encoder(
     bool,
     Arc<Mutex<Option<Recorder>>>,
 )> {
-    let encoder_cfg = get_encoder_config(
+    let scale = VIDEO_QOS.lock().unwrap().scale();
+    let mut encoder_cfg = get_encoder_config(
         &c,
         name.to_string(),
         quality,
         client_record || record_incoming,
         last_portable_service_running,
         source,
+        scale,
     );
     Encoder::set_fallback(&encoder_cfg);
     let codec_format = Encoder::negotiated_codec();
     let recorder = get_recorder(record_incoming, display_idx, source == VideoSource::Camera);
     let use_i444 = Encoder::use_i444(&encoder_cfg);
+    if use_i444 && scale < 1.0 {
+        reset_encoder_size(&mut encoder_cfg, c.width, c.height);
+        log::info!("skip video scale {scale:.2}: i444 encoding is in use");
+    }
     let encoder = Encoder::new(encoder_cfg.clone(), use_i444)?;
     Ok((encoder, encoder_cfg, codec_format, use_i444, recorder))
 }
@@ -1103,7 +1126,9 @@ fn get_encoder_config(
     record: bool,
     _portable_service: bool,
     _source: VideoSource,
+    scale: f32,
 ) -> EncoderCfg {
+    let (scaled_width, scaled_height) = scaled_size(c.width, c.height, scale);
     #[cfg(all(windows, feature = "vram"))]
     if _portable_service || c.is_gdi() || _source == VideoSource::Camera {
         log::info!("gdi:{}, portable:{}", c.is_gdi(), _portable_service);
@@ -1139,16 +1164,16 @@ fn get_encoder_config(
                 });
             }
             EncoderCfg::VPX(VpxEncoderConfig {
-                width: c.width as _,
-                height: c.height as _,
+                width: scaled_width as _,
+                height: scaled_height as _,
                 quality,
                 codec: VpxVideoCodecId::VP9,
                 keyframe_interval,
             })
         }
         format @ (CodecFormat::VP8 | CodecFormat::VP9) => EncoderCfg::VPX(VpxEncoderConfig {
-            width: c.width as _,
-            height: c.height as _,
+            width: scaled_width as _,
+            height: scaled_height as _,
             quality,
             codec: if format == CodecFormat::VP8 {
                 VpxVideoCodecId::VP8
@@ -1158,18 +1183,52 @@ fn get_encoder_config(
             keyframe_interval,
         }),
         CodecFormat::AV1 => EncoderCfg::AOM(AomEncoderConfig {
-            width: c.width as _,
-            height: c.height as _,
+            width: scaled_width as _,
+            height: scaled_height as _,
             quality,
             keyframe_interval,
         }),
         _ => EncoderCfg::VPX(VpxEncoderConfig {
-            width: c.width as _,
-            height: c.height as _,
+            width: scaled_width as _,
+            height: scaled_height as _,
             quality,
             codec: VpxVideoCodecId::VP9,
             keyframe_interval,
         }),
+    }
+}
+
+// Encoded size for the requested scale: even sides, at least 16 px, never above native.
+fn scaled_size(width: usize, height: usize, scale: f32) -> (usize, usize) {
+    if !(0.0..1.0).contains(&scale) || width < 16 || height < 16 {
+        return (width, height);
+    }
+    let scaled_width = (((width as f32) * scale) as usize) & !1;
+    let scaled_height = (((height as f32) * scale) as usize) & !1;
+    (scaled_width.clamp(16, width), scaled_height.clamp(16, height))
+}
+
+// The encoded size of a software encoder configuration.
+fn encoder_size(cfg: &EncoderCfg) -> Option<(usize, usize)> {
+    match cfg {
+        EncoderCfg::VPX(vpx) => Some((vpx.width as usize, vpx.height as usize)),
+        EncoderCfg::AOM(aom) => Some((aom.width as usize, aom.height as usize)),
+        _ => None,
+    }
+}
+
+// Restore the captured size; used when scaling has to be dropped after i444 was negotiated.
+fn reset_encoder_size(cfg: &mut EncoderCfg, width: usize, height: usize) {
+    match cfg {
+        EncoderCfg::VPX(vpx) => {
+            vpx.width = width as _;
+            vpx.height = height as _;
+        }
+        EncoderCfg::AOM(aom) => {
+            aom.width = width as u32;
+            aom.height = height as u32;
+        }
+        _ => {}
     }
 }
 

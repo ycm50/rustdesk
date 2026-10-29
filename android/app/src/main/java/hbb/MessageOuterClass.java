@@ -40295,6 +40295,17 @@ public final class MessageOuterClass {
      * @return The showMyCursor.
      */
     hbb.MessageOuterClass.OptionMessage.BoolOption getShowMyCursor();
+
+    /**
+     * <pre>
+     * Percent of the captured frame size to encode and transmit (1-100, 0/unset = native).
+     * The controlled desktop keeps its own resolution; only the stream is scaled.
+     * </pre>
+     *
+     * <code>uint32 custom_video_scale = 20;</code>
+     * @return The customVideoScale.
+     */
+    int getCustomVideoScale();
   }
   /**
    * Protobuf type {@code hbb.OptionMessage}
@@ -41123,6 +41134,47 @@ public final class MessageOuterClass {
     private void clearShowMyCursor() {
       
       showMyCursor_ = 0;
+    }
+
+    public static final int CUSTOM_VIDEO_SCALE_FIELD_NUMBER = 20;
+    private int customVideoScale_;
+    /**
+     * <pre>
+     * Percent of the captured frame size to encode and transmit (1-100, 0/unset = native).
+     * The controlled desktop keeps its own resolution; only the stream is scaled.
+     * </pre>
+     *
+     * <code>uint32 custom_video_scale = 20;</code>
+     * @return The customVideoScale.
+     */
+    @java.lang.Override
+    public int getCustomVideoScale() {
+      return customVideoScale_;
+    }
+    /**
+     * <pre>
+     * Percent of the captured frame size to encode and transmit (1-100, 0/unset = native).
+     * The controlled desktop keeps its own resolution; only the stream is scaled.
+     * </pre>
+     *
+     * <code>uint32 custom_video_scale = 20;</code>
+     * @param value The customVideoScale to set.
+     */
+    private void setCustomVideoScale(int value) {
+      
+      customVideoScale_ = value;
+    }
+    /**
+     * <pre>
+     * Percent of the captured frame size to encode and transmit (1-100, 0/unset = native).
+     * The controlled desktop keeps its own resolution; only the stream is scaled.
+     * </pre>
+     *
+     * <code>uint32 custom_video_scale = 20;</code>
+     */
+    private void clearCustomVideoScale() {
+      
+      customVideoScale_ = 0;
     }
 
     public static hbb.MessageOuterClass.OptionMessage parseFrom(
@@ -42002,6 +42054,49 @@ public final class MessageOuterClass {
         return this;
       }
 
+      /**
+       * <pre>
+       * Percent of the captured frame size to encode and transmit (1-100, 0/unset = native).
+       * The controlled desktop keeps its own resolution; only the stream is scaled.
+       * </pre>
+       *
+       * <code>uint32 custom_video_scale = 20;</code>
+       * @return The customVideoScale.
+       */
+      @java.lang.Override
+      public int getCustomVideoScale() {
+        return instance.getCustomVideoScale();
+      }
+      /**
+       * <pre>
+       * Percent of the captured frame size to encode and transmit (1-100, 0/unset = native).
+       * The controlled desktop keeps its own resolution; only the stream is scaled.
+       * </pre>
+       *
+       * <code>uint32 custom_video_scale = 20;</code>
+       * @param value The customVideoScale to set.
+       * @return This builder for chaining.
+       */
+      public Builder setCustomVideoScale(int value) {
+        copyOnWrite();
+        instance.setCustomVideoScale(value);
+        return this;
+      }
+      /**
+       * <pre>
+       * Percent of the captured frame size to encode and transmit (1-100, 0/unset = native).
+       * The controlled desktop keeps its own resolution; only the stream is scaled.
+       * </pre>
+       *
+       * <code>uint32 custom_video_scale = 20;</code>
+       * @return This builder for chaining.
+       */
+      public Builder clearCustomVideoScale() {
+        copyOnWrite();
+        instance.clearCustomVideoScale();
+        return this;
+      }
+
       // @@protoc_insertion_point(builder_scope:hbb.OptionMessage)
     }
     @java.lang.Override
@@ -42035,11 +42130,12 @@ public final class MessageOuterClass {
               "disableCamera_",
               "terminalPersistent_",
               "showMyCursor_",
+              "customVideoScale_",
             };
             java.lang.String info =
-                "\u0000\u0011\u0000\u0000\u0001\u0013\u0011\u0000\u0000\u0000\u0001\f\u0002\f\u0003" +
+                "\u0000\u0012\u0000\u0000\u0001\u0014\u0012\u0000\u0000\u0000\u0001\f\u0002\f\u0003" +
                 "\f\u0004\f\u0005\f\u0006\u0004\u0007\f\b\f\t\f\n\t\u000b\u0004\f\f\u000f\f\u0010" +
-                "\f\u0011\f\u0012\f\u0013\f";
+                "\f\u0011\f\u0012\f\u0013\f\u0014\u000b";
             return newMessageInfo(DEFAULT_INSTANCE, info, objects);
         }
         // fall through

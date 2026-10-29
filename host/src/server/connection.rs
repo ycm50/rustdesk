@@ -4969,6 +4969,12 @@ impl Connection {
                 .unwrap()
                 .user_custom_fps(self.inner.id(), o.custom_fps as _);
         }
+        if o.custom_video_scale > 0 {
+            video_service::VIDEO_QOS
+                .lock()
+                .unwrap()
+                .user_video_scale(self.inner.id(), o.custom_video_scale as _);
+        }
         if let Some(q) = o.supported_decoding.clone().take() {
             scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
         }
