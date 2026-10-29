@@ -267,6 +267,7 @@ struct UserData {
     custom_fps: Option<u32>,
     scale: Option<u32>, // encoded size as a percentage of the captured size
     lock_fps: bool,     // viewer asked to keep the frame rate regardless of the link
+    direct: bool,       // viewer reached us directly (private network), so the link is not the limit
     quality: Option<(i64, Quality)>, // (time, quality)
     delay: UserDelay,
     record: bool,
@@ -429,6 +430,8 @@ impl VideoQoS {
             // creep there; the delay samples re-ramp from the start-up rate.
             user.delay.fps = None;
         }
+        // A locked or direct viewer would otherwise keep the old target until the next reply.
+        self.adjust_fps();
     }
 
     pub fn user_auto_adjust_fps(&mut self, id: i32, fps: u32) {
@@ -448,9 +451,23 @@ impl VideoQoS {
         self.adjust_fps();
     }
 
+    // A direct (private network) viewer: no relay, abundant bandwidth, nothing to adapt to.
+    pub fn user_direct(&mut self, id: i32, direct: bool) {
+        if let Some(user) = self.users.get_mut(&id) {
+            user.direct = direct;
+        }
+        self.adjust_fps();
+    }
+
+    // True when every viewer's link should hold the requested frame rate: an explicit lock, or a
+    // direct connection, which has no bandwidth to trade frames for.
+    fn all_hold_fps(&self) -> bool {
+        !self.users.is_empty() && self.users.values().all(|u| u.lock_fps || u.direct)
+    }
+
     // True when every viewer asked to lock the frame rate; the stream then never lowers it.
     pub fn fps_locked(&self) -> bool {
-        !self.users.is_empty() && self.users.values().all(|u| u.lock_fps)
+        self.all_hold_fps()
     }
 
     // The encoded size this viewer asked for, as a percentage of the captured size.
@@ -873,8 +890,14 @@ impl VideoQoS {
     // Adjust fps based on network delay and user response time.
     fn adjust_fps(&mut self) {
         let highest_fps = self.highest_fps();
-        // The viewer chose the lock: never lower the frame rate, whatever the link reports.
-        if !self.users.is_empty() && self.users.values().all(|u| u.lock_fps) {
+        // The viewers hold the rate - an explicit lock, or a direct private network link: never
+        // lower it, whatever the link reports.
+        if self.all_hold_fps() {
+            if self.fps != highest_fps {
+                log::info!(
+                    "fps held at {highest_fps}: every viewer locks the rate or arrived over a direct connection"
+                );
+            }
             self.fps = highest_fps;
             return;
         }
@@ -971,6 +994,19 @@ mod tests {
             qos.user_network_delay(1, delay);
             assert_eq!(qos.fps(), FPS);
         }
+    }
+
+    #[test]
+    fn direct_connection_holds_the_requested_rate() {
+        let mut qos = stable_qos();
+        qos.user_custom_fps(1, 60);
+        qos.user_direct(1, true);
+        for delay in [1200, 1200, 1200, 1200] {
+            qos.user_network_delay(1, delay);
+            assert_eq!(qos.fps(), 60, "a direct link is never traded for bandwidth");
+        }
+        qos.user_delay_response_elapsed(1, 3000);
+        assert_eq!(qos.fps(), 60, "nor is it braked by a stalled probe");
     }
 
     #[test]

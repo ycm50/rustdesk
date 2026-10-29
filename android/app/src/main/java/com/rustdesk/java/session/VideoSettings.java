@@ -19,7 +19,7 @@ public final class VideoSettings {
 
     public static final int DEFAULT_FPS = 30;
     public static final int MIN_FPS = 5;
-    public static final int MAX_FPS = 60;
+    public static final int MAX_FPS = 120;
 
     /** 100 means "encode at the captured size"; lower values downscale the stream. */
     public static final int NATIVE_SCALE = 100;

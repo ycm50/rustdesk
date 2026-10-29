@@ -17,8 +17,11 @@ import android.view.ViewConfiguration;
  * <ul>
  *   <li>one finger drag pans the canvas (it must not move the remote mouse);
  *   <li>long press then drag moves the remote mouse with the left button held (text selection);
- *   <li>two finger pinch zooms about the focal point, amplified so small gestures respond;
- *   <li>two finger vertical drag also emits wheel notches so the remote scrolls;
+ *   <li>a second finger ends that selection, so the selection can never eat a two finger gesture;
+ *   <li>two finger pinch zooms about the focal point, amplified so small gestures respond,
+ *       but never once the gesture has committed to wheeling (see {@link #dragByFingers});
+ *   <li>two finger vertical drag also emits wheel notches so the remote scrolls, except on a
+ *       stream too slow to redraw (below {@link #WHEEL_MIN_FPS}), where it only pans;
  *   <li>single tap is a left click.
  * </ul>
  */
@@ -40,6 +43,14 @@ public class RemoteView extends TextureView {
 
     /** |dy| has to beat |dx| by this factor for a two finger drag to count as a wheel drag. */
     private static final float AXIS_WHEEL_RATIO = 1.5f;
+
+    /**
+     * Below this configured frame rate a wheel drag is useless: the remote redraw it needs arrives
+     * a frame later, so the gesture only pans the canvas (which is local and stays responsive).
+     * The setting is used, not the measured rate, because a static screen legitimately receives
+     * about one frame per second while the link itself is fast.
+     */
+    private static final int WHEEL_MIN_FPS = 20;
 
     private static final String TAG = "RemoteView";
 
@@ -86,11 +97,17 @@ public class RemoteView extends TextureView {
     private float focalY;
     private float wheelAccum;
 
+    // frame rate the viewer asked the host for, 0 until the caller sets it
+    private int requestedFps;
+
     // two finger direction lock: pending travel while the gesture is still undecided
     private boolean axisLocked;
     private boolean axisLockWheel;
     private float axisPendingX;
     private float axisPendingY;
+
+    /** Live pointer count: the gesture detector only ever sees the first pointer. */
+    private int pointerCount;
 
     // long press selection state
     private boolean selecting;
@@ -130,6 +147,9 @@ public class RemoteView extends TextureView {
             @Override
             public void onLongPress(MotionEvent e) {
                 if (input == null) return;
+                // The detector's timer keeps running while the extra pointers are filtered out
+                // below, so a two finger drag would otherwise arm a selection after the timeout.
+                if (pointerCount >= 2) return;
                 selecting = true;
                 panning = false;
                 selectAnchorX = e.getX();
@@ -149,6 +169,9 @@ public class RemoteView extends TextureView {
                 new ScaleGestureDetector.SimpleOnScaleGestureListener() {
                     @Override
                     public boolean onScale(ScaleGestureDetector detector) {
+                        // The gesture committed to wheeling the remote, so its two fingers move
+                        // the content instead of zooming it.
+                        if (axisLocked && axisLockWheel) return true;
                         float raw = detector.getScaleFactor();
                         if (raw <= 0f) return true;
                         float gain = (float) Math.pow(raw, PINCH_GAIN);
@@ -162,6 +185,11 @@ public class RemoteView extends TextureView {
 
     public void setInputSink(InputSink sink) {
         this.input = sink;
+    }
+
+    /** Frame rate the viewer asked the host for; 0 (not set yet) keeps the wheel behaviour. */
+    public void setRequestedFps(int fps) {
+        if (fps > 0) requestedFps = fps;
     }
 
     public void setRemoteSize(int width, int height) {
@@ -216,6 +244,7 @@ public class RemoteView extends TextureView {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        pointerCount = event.getPointerCount();
         scaleDetector.onTouchEvent(event);
 
         int action = event.getActionMasked();
@@ -225,17 +254,15 @@ public class RemoteView extends TextureView {
             resetAxisLock();
         }
 
+        if (selecting && pointerCount >= 2) {
+            // Two fingers are a pan/wheel gesture, not a selection: release the latched left
+            // button instead of letting this drag extend the remote text selection, then fall
+            // through to the two finger path below.
+            endSelection();
+            Log.d(TAG, "select: cancelled by a second finger");
+        }
+
         if (selecting) {
-            if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN && input != null) {
-                // While the left button latches a selection, a second finger taps for a right
-                // click instead of extending the selection.
-                int idx = event.getActionIndex();
-                mapToRemote(event.getX(idx), event.getY(idx), pointBuf);
-                input.onMouseMove(pointBuf[0], pointBuf[1]);
-                input.onMouseDown(pointBuf[0], pointBuf[1], InputSink.BUTTON_RIGHT);
-                input.onMouseUp(pointBuf[0], pointBuf[1], InputSink.BUTTON_RIGHT);
-                return true;
-            }
             if (event.getActionMasked() == MotionEvent.ACTION_MOVE && input != null) {
                 float rawX = event.getX();
                 float rawY = event.getY();
@@ -259,11 +286,7 @@ public class RemoteView extends TextureView {
                 }
             } else if (event.getActionMasked() == MotionEvent.ACTION_UP
                     || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
-                if (buttonHeld && input != null) {
-                    input.onMouseUp(selectRemoteX, selectRemoteY, InputSink.BUTTON_LEFT);
-                }
-                selecting = false;
-                buttonHeld = false;
+                endSelection();
             }
             return true;
         }
@@ -309,6 +332,15 @@ public class RemoteView extends TextureView {
         }
     }
 
+    /** Releases the latched left button, if any, and leaves touching/selection state. */
+    private void endSelection() {
+        if (buttonHeld && input != null) {
+            input.onMouseUp(selectRemoteX, selectRemoteY, InputSink.BUTTON_LEFT);
+        }
+        selecting = false;
+        buttonHeld = false;
+    }
+
     private float[] twoFingerFocal(MotionEvent event) {
         float x = (event.getX(0) + event.getX(1)) / 2f;
         float y = (event.getY(0) + event.getY(1)) / 2f;
@@ -329,6 +361,14 @@ public class RemoteView extends TextureView {
      * stays continuous.
      */
     private void dragByFingers(float dx, float dy, float viewX, float viewY) {
+        if (requestedFps > 0 && requestedFps < WHEEL_MIN_FPS) {
+            // A slow stream cannot show the redraw a wheel notch asks for, so a two finger drag
+            // is only ever a canvas pan here - and it starts at once, without the axis dead zone.
+            offsetX += dx;
+            offsetY += dy;
+            applyTransform();
+            return;
+        }
         if (!axisLocked) {
             axisPendingX += dx;
             axisPendingY += dy;

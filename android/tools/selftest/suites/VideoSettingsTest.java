@@ -61,9 +61,13 @@ public final class VideoSettingsTest {
         int below = new VideoSettings(1, 100).fps();
         check(below == VideoSettings.MIN_FPS,
                 "fps 1 clamps to " + VideoSettings.MIN_FPS + " (got " + below + ")");
-        int above = new VideoSettings(120, 100).fps();
+        int above = new VideoSettings(144, 100).fps();
         check(above == VideoSettings.MAX_FPS,
-                "fps 120 clamps to " + VideoSettings.MAX_FPS + " (got " + above + ")");
+                "fps 144 clamps to " + VideoSettings.MAX_FPS + " (got " + above + ")");
+        check(new VideoSettings(60, 100).fps() == 60
+                        && new VideoSettings(90, 100).fps() == 90
+                        && new VideoSettings(120, 100).fps() == 120,
+                "60 / 90 / 120 fps are kept as selected");
     }
 
     private static void testScaleClamp() {

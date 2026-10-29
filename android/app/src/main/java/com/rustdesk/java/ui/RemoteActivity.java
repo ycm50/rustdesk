@@ -118,6 +118,9 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
                 }
                 lastFpsFrames = frames;
                 lastFpsUptime = nowFps;
+                if (remoteView != null) {
+                    remoteView.setRequestedFps(current.getVideoSettings().fps());
+                }
                 if (!firstFrameLogged && frames > 0L) {
                     firstFrameLogged = true;
                     android.util.Log.i("RDJAVA", "first frame received");
@@ -525,7 +528,8 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
             current.setVideoFpsLock(lockFps);
         }
         android.util.Log.i("RDJAVA", "video settings: fps=" + fps
-                + " scale=" + scalePercent + "% quality=" + quality + " lockFps=" + lockFps);
+                + " scale=" + scalePercent + "% quality=" + quality + " lockFps=" + lockFps
+                + (current != null && current.holdsFrameRate() ? " (direct: locked)" : ""));
         pinStatus("video settings sent");
     }
 
@@ -584,8 +588,11 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
         Session current = session;
         long frames = current == null ? 0L : current.getFramesReceived();
         long bytes = current == null ? 0L : current.getBytesReceived();
+        // The lock is implied on a direct IP session, so say so: the rate there must not move.
+        String lock = current != null && current.holdsFrameRate() ? " | \u9501\u5b9a" : "";
         return platform + " " + peerWidth + "x" + peerHeight
-                + " | " + currentFps + " fps / " + frames + " \u5e27 / " + (bytes / 1024L) + " KB";
+                + " | " + currentFps + " fps / " + frames + " \u5e27 / " + (bytes / 1024L) + " KB"
+                + lock;
     }
 
     // --- clipboard uplink ---

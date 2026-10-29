@@ -3,6 +3,7 @@ package com.rustdesk.java;
 import android.Manifest;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -84,6 +85,8 @@ public class MainActivity extends Activity {
 
     /** Same shape as RustDesk passwords: short, no look-alike characters, no punctuation. */
     private static final int PASSWORD_LENGTH = 8;
+    /** Upper bound for a password the user types: the challenge hash has no practical limit. */
+    private static final int MAX_PASSWORD_LENGTH = 64;
     private static final String PASSWORD_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789";
 
     /**
@@ -282,13 +285,18 @@ public class MainActivity extends Activity {
         copy.setOnClickListener(v -> copyHostCredentials());
         buttons.addView(copy);
 
+        Button setPassword = new Button(this);
+        setPassword.setText("Set password");
+        setPassword.setOnClickListener(v -> promptHostPassword());
+        buttons.addView(setPassword);
+
         Button regenerate = new Button(this);
         regenerate.setText("New password");
         regenerate.setOnClickListener(v -> {
             hostConfig.setPassword(generatePassword());
             refreshHostInfo();
             Log.i(TAG, "host password regenerated");
-            toast("Host password regenerated");
+            applyPasswordToRunningHost("Host password regenerated");
         });
         buttons.addView(regenerate);
 
@@ -337,6 +345,70 @@ public class MainActivity extends Activity {
     private void refreshHostInfo() {
         hostIdView.setText("Host ID: " + hostConfig.getId());
         hostPasswordView.setText("Password: " + hostConfig.getPassword());
+    }
+
+    /**
+     * Asks for a host password. The generated one is random and unreadable on purpose, but a
+     * viewer that has to type it wants something it can remember, so this accepts free text.
+     */
+    private void promptHostPassword() {
+        EditText input = new EditText(this);
+        input.setHint("Password");
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+        input.setText(hostConfig.getPassword());
+        input.setSelection(input.getText().length());
+        new AlertDialog.Builder(this)
+                .setTitle("Host password")
+                .setMessage("A viewer needs this to connect. Changing it restarts the host and "
+                        + "drops any session that is using it.")
+                .setView(input)
+                .setPositiveButton("Save", (dialog, which) -> applyHostPassword(input.getText().toString()))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Stores a validated password; an empty one would let any viewer on the relay in. */
+    private void applyHostPassword(String raw) {
+        String password = raw == null ? "" : raw.trim();
+        if (password.isEmpty()) {
+            toast("Password must not be empty");
+            return;
+        }
+        if (password.length() > MAX_PASSWORD_LENGTH) {
+            toast("Password is longer than " + MAX_PASSWORD_LENGTH + " characters");
+            return;
+        }
+        for (int i = 0; i < password.length(); i++) {
+            if (Character.isWhitespace(password.charAt(i))
+                    || Character.isISOControl(password.charAt(i))) {
+                toast("Password must not contain spaces or control characters");
+                return;
+            }
+        }
+        boolean unchanged = password.equals(hostConfig.getPassword());
+        hostConfig.setPassword(password);
+        refreshHostInfo();
+        Log.i(TAG, "host password set by the user, unchanged=" + unchanged);
+        if (unchanged) {
+            toast("Host password unchanged");
+            return;
+        }
+        applyPasswordToRunningHost("Host password changed");
+    }
+
+    /**
+     * A live agent keeps the password it was built with, so a change only takes effect after it is
+     * rebuilt: without this the screen would show a password no viewer can log in with.
+     */
+    private void applyPasswordToRunningHost(String message) {
+        HostAgent agent = hostAgent;
+        if (agent == null || !agent.isRunning()) {
+            toast(message);
+            return;
+        }
+        stopHostAgent("password changed");
+        startHostAgent();
+        toast(message + ", host restarted");
     }
 
     private String generatePassword() {

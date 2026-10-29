@@ -6961,10 +6961,12 @@ mod raii {
                 shutdown_hooks::add_shutdown_hook(connection_shutdown_hook);
             });
             if conn_type == AuthConnType::Remote || conn_type == AuthConnType::ViewCamera {
-                video_service::VIDEO_QOS
-                    .lock()
-                    .unwrap()
-                    .on_connection_open(conn_id);
+                let direct = crate::common::is_direct_ip_access(&lr.username);
+                let mut qos = video_service::VIDEO_QOS.lock().unwrap();
+                qos.on_connection_open(conn_id);
+                // A direct (private network) login address means no relay in the path, so the
+                // stream holds the requested frame rate instead of adapting it down.
+                qos.user_direct(conn_id, direct);
             }
             Self(conn_id, conn_type)
         }

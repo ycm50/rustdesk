@@ -28,7 +28,7 @@ public final class VideoSettingsDialog {
     }
 
     /** Offered frame rates. The peer accepts a range, so a short list is enough here. */
-    private static final int[] FPS_VALUES = {10, 15, 20, 24, 30, 45, 60};
+    private static final int[] FPS_VALUES = {10, 15, 20, 24, 30, 45, 60, 90, 120};
 
     /** Offered stream scales, largest first. */
     private static final int[] SCALE_VALUES = {100, 75, 50, 33, 25};

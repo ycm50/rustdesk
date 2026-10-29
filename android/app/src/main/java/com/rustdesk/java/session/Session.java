@@ -277,8 +277,16 @@ public class Session implements Runnable {
     public void setVideoFpsLock(boolean lockFps) {
         videoSettings = videoSettings.withLockFps(lockFps);
         if (loggedIn) {
-            enqueue(videoSettings.toFpsLockMessage());
+            enqueue(videoSettings.withLockFps(lockFps || holdsFrameRate()).toFpsLockMessage());
         }
+    }
+
+    /**
+     * True on a direct IP session, which has no relay in the path: the host holds the requested
+     * frame rate there, so the lock cannot be switched off by the dialog.
+     */
+    public boolean holdsFrameRate() {
+        return "direct-ip".equals(connectPath);
     }
 
     public void setVideoScale(int scalePercent) {
@@ -680,7 +688,11 @@ public class Session implements Runnable {
                 .setVersion("1.5.1")
                 .setPassword(ByteString.copyFrom(digest))
                 .setSessionId(System.currentTimeMillis() & 0xFFFFFFFFL)
-                .setOption(videoSettings.toOptionMessage())
+                // A direct IP peer has no relay in the path, so the host must hold the rate:
+                // the lock is implied here, whether or not the viewer ticked it.
+                .setOption(videoSettings
+                        .withLockFps(videoSettings.lockFps() || holdsFrameRate())
+                        .toOptionMessage())
                 .build();
         status("login username=" + request.getUsername());
         transport.send(Message.newBuilder().setLoginRequest(request).build().toByteArray());
