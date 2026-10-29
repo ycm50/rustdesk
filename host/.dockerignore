@@ -1,0 +1,13 @@
+# Build context is host/ (see the header of Dockerfile). The cargo target directory is rebuilt
+# inside the image and is usually several GB, so never send it as context.
+target/
+# Prebuilt FFmpeg downloaded by host/scripts/fetch-ffmpeg.* is a few hundred MB and must not be
+# baked in: the image builds against the distribution's pkg-config libraries instead.
+.deps/
+# Documentation, packaging metadata and the example crate are not needed to build.
+docs/
+fastlane/
+appimage/
+flatpak/
+examples/
+__pycache__/

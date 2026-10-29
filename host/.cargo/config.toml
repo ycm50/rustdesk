@@ -1,0 +1,34 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Ctarget-feature=+crt-static"]
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-args=/NODEFAULTLIB:MSVCRT"]
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-Ctarget-feature=+crt-static"]
+[target.'cfg(target_os="macos")']
+rustflags = [
+    "-C", "link-args=-sectcreate __CGPreLoginApp __cgpreloginapp /dev/null",
+]
+#[target.'cfg(target_os="linux")']
+# glibc-static required, this may fix https://github.com/rustdesk/rustdesk/issues/9103, but I do not want this big change
+# this is unlikely to help also, because the other so files still use libc dynamically
+#rustflags = [
+#    "-C", "link-args=-Wl,-Bstatic -lc -Wl,-Bdynamic"
+#]
+[net]
+git-fetch-with-cli = true
+
+# webm-sys (git dependency rustdesk-org/rust-webm) compiles libwebm, whose
+# libwebm/mkvparser/mkvparser.cc uses uint32_t/uint64_t without #include <cstdint>; GCC 13 and newer
+# (Ubuntu 24.04 CI, MSYS2 UCRT64) then fail with "'uint32_t' does not name a type". cc-rs reads
+# CXXFLAGS from the build script's environment, so inject the missing header here instead of
+# requiring every caller to export it.
+#
+# force = true so an exported/stale CXXFLAGS cannot win (force defaults to false, which keeps the
+# external value); this value overrides whatever CXXFLAGS the caller set.
+#
+# Cargo only reads .cargo/config.toml from the working directory upwards, so this file applies when
+# cargo runs from host/ (host/scripts/windows/build-all.ps1 does) or when it is passed explicitly.
+# .github/workflows/build-release.yml builds from the repository root, so its cargo lines pass
+# "--config host/.cargo/config.toml".
+[env]
+CXXFLAGS = { value = "-include cstdint", force = true }
