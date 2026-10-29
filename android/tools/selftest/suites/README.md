@@ -21,7 +21,8 @@
 | `FileMsgTest.java` | 75 | protobuf | `filemsg\FileMsgTest.java` |
 | `KbSelfTest.java` | 7 | protobuf | `kb\KbSelfTest.java` |
 | `IdCheckTest.java` | 14 | 无（纯 Java） | `main\IdCheckTest.java` |
-| `VideoSettingsTest.java` | 52 | protobuf | 本仓库新增（无原件） |
+| `VideoSettingsTest.java` | 62 | protobuf | 本仓库新增（无原件） |
+| `TextInputDiffTest.java` | 3 | 无（纯 Java） | 本仓库新增（无原件） |
 | `PeerIdRules.java` | — （辅助类） | 无（纯 Java） | `main\gen\PeerIdRules.java` |
 | `HostSessionTest.java` | 49 | protobuf + bcprov | `hostsess\HostSessionTest.java` |
 | `TransportOrderTest.java` | 6 | protobuf + bcprov | 本仓库新增（无原件） |
@@ -30,14 +31,14 @@
 | `LoopbackTest.java` | 14 | protobuf + bcprov | `rdprobe\LoopbackTest.java` |
 | `HostEndToEnd.java` | 随服务器/对端而定（默认不跑） | protobuf + bcprov | `e2e\HostEndToEnd.java` |
 
-本目录内 11 个离线套件合计 **354** 项检查；加上工程自带的 `crypto.SelfTest`（51 项）共 **405** 项。
-`HostEndToEnd` 要真实 rendezvous 服务器，只有 `-IncludeNetwork` 才编译运行，不计入 405。
+本目录内 12 个离线套件合计 **367** 项检查；加上工程自带的 `crypto.SelfTest`（51 项）共 **418** 项。
+`HostEndToEnd` 要真实 rendezvous 服务器，只有 `-IncludeNetwork` 才编译运行，不计入 415。
 
 ## 编译分组（`run-selftest.ps1`）
 
 | 组 | classpath | 套件 | 工程源码 |
 | --- | --- | --- | --- |
-| A | protobuf | TerminalMsgTest、ClipSyncTest、FileMsgTest、KbSelfTest、IdCheckTest、VideoSettingsTest（+ `PeerIdRules`） | `hbb` + `session` 下 4 个纯消息类 + `VideoSettings` |
+| A | protobuf | TerminalMsgTest、ClipSyncTest、FileMsgTest、KbSelfTest、IdCheckTest、VideoSettingsTest、TextInputDiffTest（+ `PeerIdRules`） | `hbb` + `session` 下 4 个纯消息类 + `VideoSettings` + `ui/TextInputDiff` |
 | B | protobuf + bcprov | crypto.SelfTest、HostSessionTest、TransportOrderTest、PeerHandshakeInteropTest、Ed25519Test、LoopbackTest | `hbb` + `crypto` + `net` + `session`（排除 `Session.java`、`DeviceIdentity.java`）+ `host` 下 5 个纯 JVM 类（`HostSession`、`HostInputSink`、`HostClipboardSink`、`HostRegistration`、`HostAgent`） |
 
 `LoopbackTest` 归到 B 组：它自己用 BouncyCastle 的 `Ed25519Signer` 给假被控端签 `SignedId`，

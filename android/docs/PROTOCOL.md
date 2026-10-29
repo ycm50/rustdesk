@@ -348,15 +348,16 @@ displayHeight)` 带上登录阶段拿到的真实分辨率，再逐帧 `queueFra
 | 帧率 | 登录 `LoginRequest.option.custom_fps`；运行中 `Misc.option.custom_fps` | Rust host 写入 `VideoQoS`，是上限而非保证值 |
 | 传输分辨率 | `OptionMessage.custom_video_scale`（1–100 百分比，0=未设置） | host 把编码器宽高按比例缩小后编码发送；捕获与桌面分辨率不变 |
 | 画质 | `OptionMessage.image_quality`（Low/Balanced/Best） | host 用它设定位率/质量比（0.5 / 0.67 / 1.5）；帧率不再由画质决定 |
+| 锁帧率 | `OptionMessage.lock_fps`（Yes/No） | Yes = QoS 不再降帧；No/未设置 = 带宽充足时锁定请求值、拥塞时自适应降帧（下限 50%） |
 
 - 手机端：`session/VideoSettings.java` 构造消息；`Session.setVideoFps` / `Session.setVideoScale` / `Session.setVideoQuality` 发送。重连登录后会自动重放比例与画质（登录包 + `handleLoginResponse`）。
-- QoS：请求的 fps 是目标，**任何分辨率、任何画质下，实际帧率不低于该值的 75%**（`fps_floor`）。链路变差时优先降位率/画质，不再把帧率降到 75% 以下；启动即从该下限开始。
+- 是否锁帧由**主控端**决定（设置里的开关）：锁定时 QoS 固定为请求值、完全不降；不锁时带宽充足锁定请求值，拥塞才自适应降帧（下限为请求值的 50%，如设 30 最低 15），并优先降位率/画质。多路观看时只有所有 viewer 都锁才完全锁定。
 - 切换画质或 fps 会清空当前目标，让控制器重新收敛。
 - host 端：`VideoQoS` 按 viewer 记录比例并取最小值（多路观看时以最省带宽的一路为准）。只有软件编码器（VP8/VP9/AV1）应用缩放；H.264/H.265 的 HWRAM/VRAM 路径与 I444 保持原生尺寸（缩放输入尺寸会破坏编码器约定）。
 - 缩放实现：捕获帧先在原生尺寸转 I420，再用 libyuv `I420Scale` 缩到目标尺寸（`scrap/common/convert.rs`）；只在**下采样**时启用。
 - 比例变化通过现有 `SWITCH` 机制重建编码器；帧率与比例都是“请求值”，实际受带宽/QoS/平台限制。
 - 桌面分辨率仍由 host 自己的显示设置决定；本功能不再发送 `Misc.change_display_resolution`。
-- 静止画面保底：静态刷新的重复帧爆发结束后，被控端**每秒至少重编一帧**（`IDLE_KEEPALIVE_INTERVAL`），避免画面不变时对端把静默当成链路失效。
+- 静止画面：未锁帧时，重复帧爆发结束后**每秒 1 帧保底**（`IDLE_KEEPALIVE_INTERVAL`），避免对端把静默当成链路失效；**锁帧时按锁定帧率持续重发**（画面不变也保持设定值）。重发的是**上一次编码出的非关键帧原样重发**（只更新 `pts`），不再让编码器逐帧重编——软件 VP9/AV1 在 1080p 上只能编到 20 fps 左右，重编会成为锁帧的瓶颈；关键帧不进缓存，避免把关键帧按 60 fps 重复而放大码率。
 
 ### 8.2 长连接保活与重连
 

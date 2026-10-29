@@ -52,7 +52,7 @@ pub const FPS: u32 = 30;
 pub const MIN_FPS: u32 = 1;
 pub const MAX_FPS: u32 = 120;
 pub const INIT_FPS: u32 = 15;
-const MIN_FPS_PERCENT: u32 = 75;
+const MIN_FPS_PERCENT: u32 = 50;
 // Encoded video size limits, as a percentage of the captured size.
 const MIN_VIDEO_SCALE: u32 = 10;
 const MAX_VIDEO_SCALE: u32 = 100;
@@ -266,6 +266,7 @@ struct UserData {
     auto_adjust_fps: Option<u32>, // reserve for compatibility
     custom_fps: Option<u32>,
     scale: Option<u32>, // encoded size as a percentage of the captured size
+    lock_fps: bool,     // viewer asked to keep the frame rate regardless of the link
     quality: Option<(i64, Quality)>, // (time, quality)
     delay: UserDelay,
     record: bool,
@@ -439,6 +440,19 @@ impl VideoQoS {
         }
     }
 
+    // Whether this viewer locks the frame rate; locked viewers ignore the adaptive reduction.
+    pub fn user_lock_fps(&mut self, id: i32, lock: bool) {
+        if let Some(user) = self.users.get_mut(&id) {
+            user.lock_fps = lock;
+        }
+        self.adjust_fps();
+    }
+
+    // True when every viewer asked to lock the frame rate; the stream then never lowers it.
+    pub fn fps_locked(&self) -> bool {
+        !self.users.is_empty() && self.users.values().all(|u| u.lock_fps)
+    }
+
     // The encoded size this viewer asked for, as a percentage of the captured size.
     pub fn user_video_scale(&mut self, id: i32, percent: u32) {
         let percent = percent.clamp(MIN_VIDEO_SCALE, MAX_VIDEO_SCALE);
@@ -461,7 +475,7 @@ impl VideoQoS {
         )
     }
 
-    /// Lowest frame rate the adaptive controller may produce: 75% of the viewer's setting,
+    /// Lowest frame rate the adaptive controller may produce: 50% of the viewer's setting,
     /// independent of quality and encoded resolution. A congested link gives up bitrate first.
     fn fps_floor(cap: u32) -> u32 {
         let cap = cap.max(1);
@@ -856,9 +870,26 @@ impl VideoQoS {
         self.adjust_ratio_instant = self.now();
     }
 
-    // Adjust fps based on network delay and user response time
+    // Adjust fps based on network delay and user response time.
     fn adjust_fps(&mut self) {
         let highest_fps = self.highest_fps();
+        // The viewer chose the lock: never lower the frame rate, whatever the link reports.
+        if !self.users.is_empty() && self.users.values().all(|u| u.lock_fps) {
+            self.fps = highest_fps;
+            return;
+        }
+        // Abundant bandwidth: lock to the requested rate so the stream never decays below what
+        // the viewer selected. Only a congested link may fall back to the adaptive rate.
+        let healthy = !self.users.is_empty()
+            && self
+                .users
+                .values()
+                .all(|u| u.delay.avg_delay() < DELAY_THRESHOLD_150MS);
+        if healthy {
+            self.fps = highest_fps;
+            return;
+        }
+
         // The stream follows the slowest viewer, but never drops below 75% of the weakest
         // requested cap: the floor applies from the first frame and across resolutions.
         let floor = Self::fps_floor(highest_fps);

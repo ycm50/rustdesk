@@ -12,7 +12,7 @@
     processes instead of one per suite:
 
       A  protobuf only        TerminalMsgTest, ClipSyncTest, FileMsgTest, KbSelfTest,
-                              IdCheckTest, VideoSettingsTest
+                              IdCheckTest, VideoSettingsTest, TextInputDiffTest
       B  protobuf + bcprov    crypto.SelfTest, HostSessionTest, TransportOrderTest,
                               PeerHandshakeInteropTest, Ed25519Test, LoopbackTest
                               (and RelayTest with -IncludeNetwork)
@@ -261,7 +261,8 @@ $groups = [ordered]@{
             'com\rustdesk\java\session\FileMessages.java',
             'com\rustdesk\java\session\InputMessages.java',
             'com\rustdesk\java\session\TerminalMessages.java',
-            'com\rustdesk\java\session\VideoSettings.java'
+            'com\rustdesk\java\session\VideoSettings.java',
+            'com\rustdesk\java\ui\TextInputDiff.java'
         )
         Excluded     = @()
         HelperSources = @('PeerIdRules.java')   # suite-local helper, never a suite itself
@@ -344,6 +345,15 @@ $suites = @(
         Name        = 'VideoSettingsTest'
         Main        = 'com.rustdesk.java.selftest.VideoSettingsTest'
         Source      = Join-Path $SuiteDir 'VideoSettingsTest.java'
+        Network     = $false
+        Arguments   = { @() }
+        PassPattern = $passAll
+    },
+    [pscustomobject]@{
+        Group       = 'A'
+        Name        = 'TextInputDiffTest'
+        Main        = 'com.rustdesk.java.selftest.TextInputDiffTest'
+        Source      = Join-Path $SuiteDir 'TextInputDiffTest.java'
         Network     = $false
         Arguments   = { @() }
         PassPattern = $passAll

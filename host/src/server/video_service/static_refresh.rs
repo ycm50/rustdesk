@@ -1,5 +1,5 @@
 use super::{GenericService, VideoFrameController, VideoSource};
-use base::message_proto::Message;
+use base::message_proto::{video_frame, Message, VideoFrame};
 use hbb_common::{bail, ResultType};
 use scrap::{
     codec::{Encoder, EncoderCfg, BR_BALANCED, BR_BEST, BR_SPEED},
@@ -88,6 +88,10 @@ pub(super) struct StaticRefresh<'a> {
     repeat_no_outputs: usize,
     repeat_failures: usize,
     source_ready: bool,
+    lock_fps: bool, // keep repeating at the requested rate even when the screen is static
+    // The last non-key payload the encoder produced: a locked stream resends it instead of
+    // re-encoding the same picture, which is what caps software VP9/AV1 at about 20 fps.
+    cached_frame: Option<VideoFrame>,
     #[cfg(all(windows, feature = "vram"))]
     has_texture: bool,
 }
@@ -141,9 +145,15 @@ impl<'a> StaticRefresh<'a> {
             repeat_no_outputs: 0,
             repeat_failures: 0,
             source_ready: false,
+            lock_fps: false,
+            cached_frame: None,
             #[cfg(all(windows, feature = "vram"))]
             has_texture: false,
         }
+    }
+
+    pub(super) fn set_lock_fps(&mut self, lock: bool) {
+        self.lock_fps = lock;
     }
 
     pub(super) fn on_frame(&mut self, _frame: &EncodeInput) {
@@ -191,6 +201,8 @@ impl<'a> StaticRefresh<'a> {
         encoder: &mut Encoder,
         frame_controller: &mut VideoFrameController,
     ) -> ResultType<()> {
+        // Keep the unclamped interval: a locked stream repeats at the requested rate.
+        let frame_interval = spf;
         let spf = spf.max(Duration::from_secs(1) / MAX_REPEAT_FPS);
         self.repeat_output_limit = self.repeat_output_limit.max(max_repeat_frames(
             self.codec_format,
@@ -202,6 +214,29 @@ impl<'a> StaticRefresh<'a> {
         #[cfg(test)]
         let elapsed = self.elapsed_since_encode;
         let past_repeat_limit = self.repeat_output_counter >= self.repeat_output_limit;
+        // A locked stream has to reach the requested rate, which software VP9/AV1 cannot do at
+        // 1080p by encoding the same picture again. Past the refinement burst the payload at
+        // hand is resent instead. Key frames stay out of the cache: repeating one at 60 fps
+        // would multiply the bitrate.
+        if self.lock_fps
+            && past_repeat_limit
+            && self.repeat_output_limit > 0
+            && self.source.is_monitor()
+        {
+            if let Some(vf) = self.cached_frame.clone() {
+                #[cfg(not(test))]
+                {
+                    // The capture wait covers part of the interval; wait out the rest so the
+                    // resend rate is the requested one instead of a fraction of it.
+                    let interval = frame_interval.max(Duration::from_millis(5));
+                    if let Some(rest) = interval.checked_sub(elapsed) {
+                        std::thread::sleep(rest);
+                    }
+                }
+                self.send_repeat(vf, ms, now, frame_controller);
+                return Ok(());
+            }
+        }
         if !self.source.is_monitor()
             || self.codec_format == CodecFormat::AV1
             || !self.source_ready
@@ -213,9 +248,15 @@ impl<'a> StaticRefresh<'a> {
             || self.repeat_no_outputs >= MAX_REPEAT_NO_OUTPUTS
             || {
                 let interval = if past_repeat_limit {
-                    // The short burst that drains encoder latency is over; from now on keep a
-                    // heartbeat frame per second so the peer never sees a silent stream.
-                    IDLE_KEEPALIVE_INTERVAL
+                    if self.lock_fps {
+                        // Locked: the viewer asked for a fixed rate, so keep producing repeat
+                        // frames at that rate even when nothing on screen changes.
+                        frame_interval.max(Duration::from_millis(5))
+                    } else {
+                        // Unlocked: one heartbeat frame per second is enough to keep the
+                        // stream from going silent.
+                        IDLE_KEEPALIVE_INTERVAL
+                    }
                 } else if matches!(self.codec_format, CodecFormat::VP8 | CodecFormat::VP9)
                     || (self.repeat_output_counter == 0 && self.repeat_no_outputs == 0)
                 {
@@ -280,6 +321,11 @@ impl<'a> StaticRefresh<'a> {
                     return Ok(());
                 }
             };
+            self.cached_frame = if has_key_frame(&vf) {
+                None
+            } else {
+                Some(vf.clone())
+            };
             self.repeat_output_counter += 1;
             self.repeat_failures = 0;
             vf.display = self.display_idx as _;
@@ -295,6 +341,53 @@ impl<'a> StaticRefresh<'a> {
             // Static refinement must not count as motion for adaptive bitrate.
         }
         Ok(())
+    }
+
+    fn send_repeat(
+        &mut self,
+        mut vf: VideoFrame,
+        ms: i64,
+        now: Instant,
+        frame_controller: &mut VideoFrameController,
+    ) {
+        set_frame_pts(&mut vf, ms);
+        vf.display = self.display_idx as _;
+        self.last_encode = Instant::now();
+        #[cfg(test)]
+        {
+            self.elapsed_since_encode = Duration::ZERO;
+        }
+        self.repeat_output_counter += 1;
+        let mut msg = Message::new();
+        msg.set_video_frame(vf);
+        self.recorder
+            .lock()
+            .unwrap()
+            .as_mut()
+            .map(|r| r.write_message(&msg, self.width, self.height));
+        let send_conn_ids = self.sp.send_video_frame(msg);
+        frame_controller.set_send(now, send_conn_ids);
+    }
+}
+
+fn has_key_frame(vf: &VideoFrame) -> bool {
+    use video_frame::Union::*;
+    match &vf.union {
+        Some(Vp8s(frames)) | Some(Vp9s(frames)) | Some(Av1s(frames)) | Some(H264s(frames))
+        | Some(H265s(frames)) => frames.frames.iter().any(|f| f.key),
+        _ => true,
+    }
+}
+
+fn set_frame_pts(vf: &mut VideoFrame, pts: i64) {
+    use video_frame::Union::*;
+    let frames = match &mut vf.union {
+        Some(Vp8s(frames)) | Some(Vp9s(frames)) | Some(Av1s(frames)) | Some(H264s(frames))
+        | Some(H265s(frames)) => frames,
+        _ => return,
+    };
+    for f in frames.frames.iter_mut() {
+        f.pts = pts;
     }
 }
 
@@ -454,6 +547,41 @@ mod tests {
         refresh.elapsed_since_encode = Duration::from_secs(1);
         attempt(&mut refresh, &calls, &[1], spf);
         assert_eq!(calls.get(), limit + 2);
+    }
+
+    #[test]
+    fn locked_stream_resends_the_cached_frame_instead_of_reencoding() {
+        let sp = GenericService::new("static-refresh-test".to_owned(), false);
+        let recorder = Arc::new(Mutex::new(None));
+        let mut refresh = new_refresh(
+            VideoSource::Monitor,
+            CodecFormat::VP9,
+            &sp,
+            &recorder,
+            0,
+            1,
+            1,
+        );
+        let calls = Rc::new(Cell::new(0));
+        let spf = Duration::from_millis(1000 / 60);
+        refresh.set_lock_fps(true);
+        refresh.on_frame(&EncodeInput::YUV(&[1]));
+        refresh.on_encoded(true);
+        let limit = max_repeat_frames(CodecFormat::VP9, BR_BALANCED, HardwareBackend::Other);
+        for _ in 0..limit {
+            refresh.elapsed_since_encode = Duration::from_secs(1);
+            attempt(&mut refresh, &calls, &[1], spf);
+        }
+        assert_eq!(calls.get(), limit);
+
+        // Past the refinement burst the cached payload is resent, so the requested rate no
+        // longer depends on how fast the encoder can encode.
+        for _ in 0..10 {
+            refresh.elapsed_since_encode = spf;
+            attempt(&mut refresh, &calls, &[1], spf);
+        }
+        assert_eq!(calls.get(), limit);
+        assert_eq!(refresh.repeat_output_counter, limit + 10);
     }
 
     #[test]

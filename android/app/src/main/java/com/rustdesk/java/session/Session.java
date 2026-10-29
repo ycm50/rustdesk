@@ -273,6 +273,14 @@ public class Session implements Runnable {
         }
     }
 
+    /** Locks or unlocks the frame rate: locked never drops, unlocked adapts to the link. */
+    public void setVideoFpsLock(boolean lockFps) {
+        videoSettings = videoSettings.withLockFps(lockFps);
+        if (loggedIn) {
+            enqueue(videoSettings.toFpsLockMessage());
+        }
+    }
+
     public void setVideoScale(int scalePercent) {
         videoSettings = videoSettings.withScale(scalePercent);
         if (loggedIn) {
@@ -615,13 +623,11 @@ public class Session implements Runnable {
                     break;
                 }
                 case VIDEO_FRAME: {
+                    // The counters feed the viewer's stats line; a per-frame status message would
+                    // replace that line with a bare running total, so none is emitted here.
                     int received = handleVideoFrame(message.getVideoFrame());
                     if (received > 0) {
-                        long total = framesReceived + received;
-                        framesReceived = total;
-                        if (total / 100 > (total - received) / 100) {
-                            status("streaming, " + total + " frames");
-                        }
+                        framesReceived += received;
                     }
                     break;
                 }

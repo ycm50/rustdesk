@@ -970,6 +970,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         send_counter += 1;
                     }
                 }
+                static_refresh.set_lock_fps(VIDEO_QOS.lock().unwrap().fps_locked());
                 static_refresh.try_encode(
                     &yuv,
                     spf,

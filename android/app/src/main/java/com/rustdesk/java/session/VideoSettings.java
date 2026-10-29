@@ -6,12 +6,14 @@ import hbb.MessageOuterClass.Misc;
 import hbb.MessageOuterClass.OptionMessage;
 
 /**
- * Video options of a session: frame rate, stream scale and image quality.
+ * Video options of a session: frame rate, stream scale, image quality and whether the frame rate
+ * is locked.
  *
  * <p>The scale keeps the captured size at 100; lower values make the host encode and send a
  * smaller image without touching the controlled desktop's own resolution. The quality selects
- * the host's bitrate/quality ratio; its adaptive controller trades frame rate against quality
- * within the requested fps cap.</p>
+ * the host's bitrate/quality ratio. When the frame rate is locked, the host never lowers it;
+ * otherwise its adaptive controller may trade frame rate for bandwidth down to half the
+ * requested value.</p>
  */
 public final class VideoSettings {
 
@@ -28,16 +30,22 @@ public final class VideoSettings {
     private final int fps;
     private final int scalePercent;
     private final ImageQuality quality;
+    private final boolean lockFps;
 
     public VideoSettings(int fps, int scalePercent) {
-        this(fps, scalePercent, DEFAULT_QUALITY);
+        this(fps, scalePercent, DEFAULT_QUALITY, false);
     }
 
     public VideoSettings(int fps, int scalePercent, ImageQuality quality) {
+        this(fps, scalePercent, quality, false);
+    }
+
+    public VideoSettings(int fps, int scalePercent, ImageQuality quality, boolean lockFps) {
         this.fps = clampFps(fps);
         this.scalePercent = clampScale(scalePercent);
         this.quality = quality == null || quality == ImageQuality.NotSet
                 ? DEFAULT_QUALITY : quality;
+        this.lockFps = lockFps;
     }
 
     public static VideoSettings defaults() {
@@ -45,7 +53,7 @@ public final class VideoSettings {
     }
 
     public VideoSettings copy() {
-        return new VideoSettings(fps, scalePercent, quality);
+        return new VideoSettings(fps, scalePercent, quality, lockFps);
     }
 
     public int fps() {
@@ -60,31 +68,43 @@ public final class VideoSettings {
         return quality;
     }
 
+    /** True when the viewer asked the host to never lower the frame rate. */
+    public boolean lockFps() {
+        return lockFps;
+    }
+
     /** True when the stream is smaller than the captured image. */
     public boolean hasCustomScale() {
         return scalePercent < NATIVE_SCALE;
     }
 
     public VideoSettings withFps(int fps) {
-        return new VideoSettings(fps, scalePercent, quality);
+        return new VideoSettings(fps, scalePercent, quality, lockFps);
     }
 
     public VideoSettings withScale(int scalePercent) {
-        return new VideoSettings(fps, scalePercent, quality);
+        return new VideoSettings(fps, scalePercent, quality, lockFps);
     }
 
     public VideoSettings withQuality(ImageQuality quality) {
-        return new VideoSettings(fps, scalePercent, quality);
+        return new VideoSettings(fps, scalePercent, quality, lockFps);
+    }
+
+    public VideoSettings withLockFps(boolean lockFps) {
+        return new VideoSettings(fps, scalePercent, quality, lockFps);
     }
 
     /**
-     * Option message sent at login. The frame rate and quality are always carried; a native
-     * scale is left at its default so an untouched session does not ask for scaling.
+     * Option message sent at login. The frame rate, quality and lock switch are always carried;
+     * a native scale is left at its default so an untouched session does not ask for scaling.
      */
     public OptionMessage toOptionMessage() {
         OptionMessage.Builder builder = OptionMessage.newBuilder()
                 .setCustomFps(fps)
-                .setImageQuality(quality);
+                .setImageQuality(quality)
+                .setLockFps(lockFps
+                        ? OptionMessage.BoolOption.Yes
+                        : OptionMessage.BoolOption.No);
         if (hasCustomScale()) {
             builder.setCustomVideoScale(scalePercent);
         }
@@ -120,9 +140,22 @@ public final class VideoSettings {
                 .build();
     }
 
+    /** Runtime lock switch: {@code Message.misc.option.lock_fps}. */
+    public Message toFpsLockMessage() {
+        OptionMessage option = OptionMessage.newBuilder()
+                .setLockFps(lockFps
+                        ? OptionMessage.BoolOption.Yes
+                        : OptionMessage.BoolOption.No)
+                .build();
+        return Message.newBuilder()
+                .setMisc(Misc.newBuilder().setOption(option).build())
+                .build();
+    }
+
     @Override
     public String toString() {
-        return "fps=" + fps + " scale=" + scalePercent + "% quality=" + quality;
+        return "fps=" + fps + " scale=" + scalePercent + "% quality=" + quality
+                + " lockFps=" + lockFps;
     }
 
     private static int clampFps(int fps) {

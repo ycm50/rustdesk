@@ -40306,6 +40306,27 @@ public final class MessageOuterClass {
      * @return The customVideoScale.
      */
     int getCustomVideoScale();
+
+    /**
+     * <pre>
+     * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+     * adaptive controller trade frame rate for bandwidth.
+     * </pre>
+     *
+     * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+     * @return The enum numeric value on the wire for lockFps.
+     */
+    int getLockFpsValue();
+    /**
+     * <pre>
+     * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+     * adaptive controller trade frame rate for bandwidth.
+     * </pre>
+     *
+     * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+     * @return The lockFps.
+     */
+    hbb.MessageOuterClass.OptionMessage.BoolOption getLockFps();
   }
   /**
    * Protobuf type {@code hbb.OptionMessage}
@@ -41175,6 +41196,73 @@ public final class MessageOuterClass {
     private void clearCustomVideoScale() {
       
       customVideoScale_ = 0;
+    }
+
+    public static final int LOCK_FPS_FIELD_NUMBER = 21;
+    private int lockFps_;
+    /**
+     * <pre>
+     * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+     * adaptive controller trade frame rate for bandwidth.
+     * </pre>
+     *
+     * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+     * @return The enum numeric value on the wire for lockFps.
+     */
+    @java.lang.Override
+    public int getLockFpsValue() {
+      return lockFps_;
+    }
+    /**
+     * <pre>
+     * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+     * adaptive controller trade frame rate for bandwidth.
+     * </pre>
+     *
+     * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+     * @return The lockFps.
+     */
+    @java.lang.Override
+    public hbb.MessageOuterClass.OptionMessage.BoolOption getLockFps() {
+      hbb.MessageOuterClass.OptionMessage.BoolOption result = hbb.MessageOuterClass.OptionMessage.BoolOption.forNumber(lockFps_);
+      return result == null ? hbb.MessageOuterClass.OptionMessage.BoolOption.UNRECOGNIZED : result;
+    }
+    /**
+     * <pre>
+     * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+     * adaptive controller trade frame rate for bandwidth.
+     * </pre>
+     *
+     * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+     * @param value The enum numeric value on the wire for lockFps to set.
+     */
+    private void setLockFpsValue(int value) {
+        lockFps_ = value;
+    }
+    /**
+     * <pre>
+     * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+     * adaptive controller trade frame rate for bandwidth.
+     * </pre>
+     *
+     * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+     * @param value The lockFps to set.
+     */
+    private void setLockFps(hbb.MessageOuterClass.OptionMessage.BoolOption value) {
+      lockFps_ = value.getNumber();
+      
+    }
+    /**
+     * <pre>
+     * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+     * adaptive controller trade frame rate for bandwidth.
+     * </pre>
+     *
+     * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+     */
+    private void clearLockFps() {
+      
+      lockFps_ = 0;
     }
 
     public static hbb.MessageOuterClass.OptionMessage parseFrom(
@@ -42097,6 +42185,77 @@ public final class MessageOuterClass {
         return this;
       }
 
+      /**
+       * <pre>
+       * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+       * adaptive controller trade frame rate for bandwidth.
+       * </pre>
+       *
+       * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+       * @return The enum numeric value on the wire for lockFps.
+       */
+      @java.lang.Override
+      public int getLockFpsValue() {
+        return instance.getLockFpsValue();
+      }
+      /**
+       * <pre>
+       * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+       * adaptive controller trade frame rate for bandwidth.
+       * </pre>
+       *
+       * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+       * @param value The lockFps to set.
+       * @return This builder for chaining.
+       */
+      public Builder setLockFpsValue(int value) {
+        copyOnWrite();
+        instance.setLockFpsValue(value);
+        return this;
+      }
+      /**
+       * <pre>
+       * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+       * adaptive controller trade frame rate for bandwidth.
+       * </pre>
+       *
+       * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+       * @return The lockFps.
+       */
+      @java.lang.Override
+      public hbb.MessageOuterClass.OptionMessage.BoolOption getLockFps() {
+        return instance.getLockFps();
+      }
+      /**
+       * <pre>
+       * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+       * adaptive controller trade frame rate for bandwidth.
+       * </pre>
+       *
+       * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+       * @param value The enum numeric value on the wire for lockFps to set.
+       * @return This builder for chaining.
+       */
+      public Builder setLockFps(hbb.MessageOuterClass.OptionMessage.BoolOption value) {
+        copyOnWrite();
+        instance.setLockFps(value);
+        return this;
+      }
+      /**
+       * <pre>
+       * Yes = keep the requested frame rate regardless of the link (locked); No/NotSet = let the
+       * adaptive controller trade frame rate for bandwidth.
+       * </pre>
+       *
+       * <code>.hbb.OptionMessage.BoolOption lock_fps = 21;</code>
+       * @return This builder for chaining.
+       */
+      public Builder clearLockFps() {
+        copyOnWrite();
+        instance.clearLockFps();
+        return this;
+      }
+
       // @@protoc_insertion_point(builder_scope:hbb.OptionMessage)
     }
     @java.lang.Override
@@ -42131,11 +42290,12 @@ public final class MessageOuterClass {
               "terminalPersistent_",
               "showMyCursor_",
               "customVideoScale_",
+              "lockFps_",
             };
             java.lang.String info =
-                "\u0000\u0012\u0000\u0000\u0001\u0014\u0012\u0000\u0000\u0000\u0001\f\u0002\f\u0003" +
+                "\u0000\u0013\u0000\u0000\u0001\u0015\u0013\u0000\u0000\u0000\u0001\f\u0002\f\u0003" +
                 "\f\u0004\f\u0005\f\u0006\u0004\u0007\f\b\f\t\f\n\t\u000b\u0004\f\f\u000f\f\u0010" +
-                "\f\u0011\f\u0012\f\u0013\f\u0014\u000b";
+                "\f\u0011\f\u0012\f\u0013\f\u0014\u000b\u0015\f";
             return newMessageInfo(DEFAULT_INSTANCE, info, objects);
         }
         // fall through

@@ -91,6 +91,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The workflow_dispatch tag is the single source of truth for the version: the version
+      # fields in the tree are overwritten from it before anything is compiled, so a release
+      # does not need a matching version bump in the commit first.
+      - name: Apply the release tag as the app version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          version="${tag#v}"
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::release_tag $tag is not v<major>.<minor>.<patch>"
+            exit 1
+          fi
+          sed -i "s/^\( *\)versionName \".*\"$/\1versionName \"$version\"/" android/app/build.gradle
+          grep -n 'versionName' android/app/build.gradle
+
       # ubuntu-latest has about 14 GB of disk; Android SDK + Gradle cache + build output can run
       # out, which is the most common mysterious Android CI failure. Drop the toolchains this
       # project does not use first.
@@ -323,6 +339,29 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+
+      # The workflow_dispatch tag is the single source of truth for the version: the version
+      # fields in the tree are overwritten from it before anything is compiled, so a release
+      # does not need a matching version bump in the commit first.
+      - name: Apply the release tag as the app version
+        # windows-latest defaults to pwsh, and this step is shared by all three matrix entries:
+        # name bash or the Windows job dies on the very first ${tag#v}.
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          version="${tag#v}"
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::release_tag $tag is not v<major>.<minor>.<patch>"
+            exit 1
+          fi
+          line="$(grep -n -m1 '^version = "' host/Cargo.toml | cut -d: -f1)"
+          if [ -z "$line" ]; then
+            echo "::error::no package version line in host/Cargo.toml"
+            exit 1
+          fi
+          sed -i "${line}s/.*/version = \"$version\"/" host/Cargo.toml
+          sed -n '1,5p' host/Cargo.toml
 
       # ---- Linux dependencies --------------------------------------------------------------
       # The package list comes from "cargo tree --target x86_64-unknown-linux-gnu" (default
@@ -748,21 +787,15 @@ jobs:
         with:
           path: dist
 
-      # The tag is the version; refuse to tag something that says otherwise.
-      - name: Check the tag matches the version in this commit
+      # The tag is the version - the build jobs wrote inputs.release_tag into host/Cargo.toml and
+      # android/app/build.gradle before compiling - so the only thing left to refuse is reusing a
+      # tag that was already published.
+      - name: Check the tag does not exist yet
         run: |
           set -euo pipefail
           tag="${{ inputs.release_tag }}"
-          version="${tag#v}"
-          host_version=$(sed -n 's/^version = "\(.*\)"/\1/p' host/Cargo.toml | head -n1)
-          android_version=$(sed -n 's/.*versionName "\(.*\)"/\1/p' android/app/build.gradle | head -n1)
-          echo "tag=$tag version=$version host=$host_version android=$android_version"
-          if [ "$version" != "$host_version" ] || [ "$version" != "$android_version" ]; then
-            echo "::error::release_tag $tag does not match host ($host_version) / android ($android_version)"
-            exit 1
-          fi
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "::error::tag $tag already exists"
+            echo "::error::tag $tag already exists - use the next version as release_tag"
             exit 1
           fi
 

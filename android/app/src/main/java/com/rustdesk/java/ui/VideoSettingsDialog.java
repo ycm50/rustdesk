@@ -3,6 +3,7 @@ package com.rustdesk.java.ui;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.widget.ArrayAdapter;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -23,7 +24,7 @@ public final class VideoSettingsDialog {
 
     /** Receives the chosen values on Apply; {@code scalePercent} is 25..100. */
     public interface Applier {
-        void onApply(int fps, int scalePercent, ImageQuality quality);
+        void onApply(int fps, int scalePercent, ImageQuality quality, boolean lockFps);
     }
 
     /** Offered frame rates. The peer accepts a range, so a short list is enough here. */
@@ -98,9 +99,15 @@ public final class VideoSettingsDialog {
         qualitySpinner.setSelection(qualityIndex(settings.quality()));
         layout.addView(qualitySpinner);
 
+        final CheckBox lockFps = new CheckBox(activity);
+        lockFps.setText("Lock frame rate (never drop below the setting)");
+        lockFps.setChecked(settings.lockFps());
+        layout.addView(lockFps);
+
         TextView note = new TextView(activity);
         note.setText("Only the transmitted video is scaled; the controlled desktop keeps its "
-                + "own resolution. The host adapts quality and frame rate to the network.");
+                + "own resolution. With the lock off, the host may halve the frame rate on a "
+                + "congested link.");
         layout.addView(note);
 
         new AlertDialog.Builder(activity)
@@ -114,7 +121,7 @@ public final class VideoSettingsDialog {
                     int qualityPick = Math.max(0, qualitySpinner.getSelectedItemPosition());
                     ImageQuality quality =
                             QUALITY_VALUES[Math.min(qualityPick, QUALITY_VALUES.length - 1)];
-                    applier.onApply(fps, scale, quality);
+                    applier.onApply(fps, scale, quality, lockFps.isChecked());
                 })
                 .setNegativeButton("Cancel", null)
                 .show();

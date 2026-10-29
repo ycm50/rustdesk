@@ -56,6 +56,8 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
     // set when the dispatch path already forwarded the Backspace for a key event, so the
     // TextWatcher does not send a second one for the same deletion
     private boolean skipWatcherBackspace;
+    /** What the peer already typed for this field; empty until the first keystroke. */
+    private String sentText = "";
     private VideoDecoder decoder;
     private DeviceIdentity identity;
     private Session session;
@@ -184,39 +186,7 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
             @Override
             public void onTextChanged(CharSequence s, int start, int before, int count) {
                 if (session == null) return;
-                if (count > 0) {
-                    String added = s.subSequence(start, start + count).toString();
-                    // Some IMEs still deliver Enter as a newline; the peer needs a Return key
-                    // press, never a '\n' inside the typed text.
-                    if (added.indexOf('\n') >= 0) {
-                        String text = added.replace("\n", "");
-                        if (!text.isEmpty()) {
-                            session.sendMessage(InputMessages.text(text));
-                        }
-                        for (int i = 0; i < added.length(); i++) {
-                            if (added.charAt(i) == '\n') {
-                                sendControlKey(ControlKey.Return);
-                            }
-                        }
-                        android.util.Log.i("RDJAVA", "soft enter via newline");
-                        return;
-                    }
-                    session.sendMessage(InputMessages.text(added));
-                    return;
-                }
-                // A pure deletion (the IME's Backspace) leaves no character to send, so the
-                // peer has to be told about the key instead. Only reached while the input is
-                // visible, because dispatchKeyEvent hands every key to the IME in that state.
-                if (before > 0) {
-                    // The dispatch path already forwarded the key event that caused this deletion;
-                    // sending again here would delete two characters on the peer.
-                    if (skipWatcherBackspace) {
-                        skipWatcherBackspace = false;
-                        return;
-                    }
-                    sendControlKey(ControlKey.Backspace);
-                    android.util.Log.i("RDJAVA", "soft backspace x" + before);
-                }
+                streamTextInput(s.toString());
             }
 
             @Override
@@ -406,6 +376,51 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
         session.sendMessage(InputMessages.controlKey(key, false));
     }
 
+    /**
+     * Streams the field to the peer as the difference from what was already sent.
+     *
+     * <p>An IME reports each revision of its composing run as one replacement, so the changed
+     * range is not what the peer is missing: phone speech input rewrites the whole sentence on
+     * every recognised word and forwarding it verbatim types the text over and over. The diff
+     * keeps the shared prefix and suffix, deletes the stale tail and types only the new middle.
+     */
+    private void streamTextInput(String current) {
+        TextInputDiff diff = TextInputDiff.between(sentText, current);
+        sentText = current;
+        int backspaces = diff.backspaces;
+        // dispatchKeyEvent already forwarded the key event that caused this deletion; sending
+        // again here would delete two characters on the peer.
+        if (backspaces > 0 && skipWatcherBackspace) {
+            skipWatcherBackspace = false;
+            backspaces--;
+        }
+        for (int i = 0; i < backspaces; i++) {
+            sendControlKey(ControlKey.Backspace);
+        }
+        if (diff.insert.isEmpty()) {
+            if (backspaces > 0) {
+                android.util.Log.i("RDJAVA", "soft backspace x" + backspaces);
+            }
+            return;
+        }
+        // Some IMEs still deliver Enter as a newline; the peer needs a Return key press, never a
+        // '\n' inside the typed text.
+        if (diff.insert.indexOf('\n') >= 0) {
+            String text = diff.insert.replace("\n", "");
+            if (!text.isEmpty()) {
+                session.sendMessage(InputMessages.text(text));
+            }
+            for (int i = 0; i < diff.insert.length(); i++) {
+                if (diff.insert.charAt(i) == '\n') {
+                    sendControlKey(ControlKey.Return);
+                }
+            }
+            android.util.Log.i("RDJAVA", "soft enter via newline");
+            return;
+        }
+        session.sendMessage(InputMessages.text(diff.insert));
+    }
+
     /** Back closes the on-screen keyboard first, then leaves the remote screen. */
     private void handleBack() {
         if (textInput != null && textInput.getVisibility() == android.view.View.VISIBLE) {
@@ -447,7 +462,7 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
         if (identity == null) identity = DeviceIdentity.load(this);
         session = new Session(id, getIntent().getStringExtra(EXTRA_PASSWORD), server,
                 21116, identity, decoder, this);
-        session.setVideoSettings(new VideoSettings(loadFps(), loadScale(), loadQuality()));
+        session.setVideoSettings(new VideoSettings(loadFps(), loadScale(), loadQuality(), loadLockFps()));
         session.start();
     }
 
@@ -478,7 +493,7 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
         session = new Session(id, getIntent().getStringExtra(EXTRA_PASSWORD), server,
                 21116, identity, decoder, this);
         // Same persisted settings as the first connect; a fresh Session starts with defaults.
-        session.setVideoSettings(new VideoSettings(loadFps(), loadScale(), loadQuality()));
+        session.setVideoSettings(new VideoSettings(loadFps(), loadScale(), loadQuality(), loadLockFps()));
         session.start();
     }
 
@@ -493,21 +508,24 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
     }
 
     /** Stores the choice and pushes it to the live session. */
-    private void applyVideoSettings(int fps, int scalePercent, ImageQuality quality) {
+    private void applyVideoSettings(int fps, int scalePercent, ImageQuality quality,
+                                    boolean lockFps) {
         getSharedPreferences("rustdesk_java_prefs", MODE_PRIVATE)
                 .edit()
                 .putInt("video_fps", fps)
                 .putInt("video_scale", scalePercent)
                 .putInt("video_quality", quality.getNumber())
+                .putBoolean("video_fps_lock", lockFps)
                 .apply();
         Session current = session;
         if (current != null) {
             current.setVideoFps(fps);
             current.setVideoScale(scalePercent);
             current.setVideoQuality(quality);
+            current.setVideoFpsLock(lockFps);
         }
         android.util.Log.i("RDJAVA", "video settings: fps=" + fps
-                + " scale=" + scalePercent + "% quality=" + quality);
+                + " scale=" + scalePercent + "% quality=" + quality + " lockFps=" + lockFps);
         pinStatus("video settings sent");
     }
 
@@ -519,6 +537,11 @@ public class RemoteActivity extends Activity implements InputSink, Session.Liste
     private int loadScale() {
         return getSharedPreferences("rustdesk_java_prefs", MODE_PRIVATE)
                 .getInt("video_scale", VideoSettings.NATIVE_SCALE);
+    }
+
+    private boolean loadLockFps() {
+        return getSharedPreferences("rustdesk_java_prefs", MODE_PRIVATE)
+                .getBoolean("video_fps_lock", false);
     }
 
     private ImageQuality loadQuality() {

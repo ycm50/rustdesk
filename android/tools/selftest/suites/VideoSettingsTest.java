@@ -6,6 +6,7 @@ import com.rustdesk.java.session.VideoSettings;
 import hbb.MessageOuterClass.ImageQuality;
 import hbb.MessageOuterClass.Message;
 import hbb.MessageOuterClass.Misc;
+import hbb.MessageOuterClass.OptionMessage;
 
 /**
  * Pins the stream-parameter encoding of {@link VideoSettings}: frame-rate/scale clamping, the
@@ -25,6 +26,7 @@ public final class VideoSettingsTest {
         testFpsClamp();
         testScaleClamp();
         testQuality();
+        testLockFps();
         testWithMethods();
         testOptionMessage();
         testFpsMessage();
@@ -89,6 +91,34 @@ public final class VideoSettingsTest {
                 "NotSet falls back to Balanced");
         check(new VideoSettings(30, 100, null).quality() == ImageQuality.Balanced,
                 "null falls back to Balanced");
+    }
+
+    private static void testLockFps() {
+        section("frame-rate lock switch");
+        check(!VideoSettings.defaults().lockFps(), "defaults() leaves the frame rate unlocked");
+
+        VideoSettings base = new VideoSettings(30, 50, ImageQuality.Low, false);
+        VideoSettings locked = base.withLockFps(true);
+        check(locked != base, "withLockFps() returns a new instance");
+        check(locked.lockFps(), "withLockFps(true) locks the frame rate");
+        check(!base.lockFps(), "original stays unlocked");
+        check(locked.fps() == 30 && locked.scalePercent() == 50 && locked.quality() == ImageQuality.Low,
+                "withLockFps keeps the other settings");
+
+        check(!VideoSettings.defaults().toOptionMessage().getLockFps()
+                        .equals(OptionMessage.BoolOption.Yes),
+                "unlocked login option does not request the lock");
+        check(new VideoSettings(30, 50, ImageQuality.Low, true).toOptionMessage().getLockFps()
+                        == OptionMessage.BoolOption.Yes,
+                "locked login option requests the lock");
+
+        Message lockMsg = new VideoSettings(30, 50, ImageQuality.Low, true).toFpsLockMessage();
+        check(lockMsg.hasMisc() && lockMsg.getMisc().hasOption(),
+                "lock message carries misc.option");
+        check(lockMsg.getMisc().getOption().getLockFps() == OptionMessage.BoolOption.Yes,
+                "lock message sets lock_fps = Yes");
+        check(lockMsg.getMisc().getOption().getCustomFps() == 0,
+                "lock message leaves custom_fps unset");
     }
 
     private static void testWithMethods() {
