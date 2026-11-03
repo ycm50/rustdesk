@@ -1295,7 +1295,9 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
     #[cfg(not(target_os = "macos"))]
     let mut to_release = Vec::new();
     if evt_type == MOUSE_TYPE_DOWN {
-        fix_modifiers(&evt.modifiers[..], &mut en, 0);
+        if !evt.modifiers.is_empty() {
+            fix_modifiers(&evt.modifiers[..], &mut en, 0);
+        }
         #[cfg(target_os = "macos")]
         en.reset_flag();
         for ref ck in evt.modifiers.iter() {
