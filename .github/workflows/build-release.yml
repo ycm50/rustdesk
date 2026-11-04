@@ -60,6 +60,9 @@ env:
   # crates.io / services.gradle.org.
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: '5'
+  # A release build on CI never reuses incremental state, and the cached dependency tree is half
+  # the size without it (see the cache step below).
+  CARGO_INCREMENTAL: '0'
 
 jobs:
   # ------------------------------------------------------------------ guard
@@ -543,16 +546,24 @@ jobs:
           rustc --version
           cargo --version
 
-      # Cache both the registry and the build directory. The key carries the Cargo.lock hash so a
-      # dependency change starts a new entry; platform/arch keeps the three jobs from sharing a
-      # target dir built for a different target. restore-keys gives a warm near-miss instead.
-      - name: Cache cargo registry and host target
+      # Cache the registry and the compiled dependencies, not the target dir as a whole.
+      #
+      # host/target used to be cached wholesale and cost 1.7-2.3 GB per platform: it holds every
+      # incremental artefact and the debug tree the release profile never reads. Four entries were
+      # 7.2 of the 10 GB the repository is allowed, so the next dependency bump evicted caches the
+      # other jobs still needed. What actually saves the 40-70 minute rebuild is `target/release`
+      # (the .rlib/.rmeta of each dependency) plus the fingerprints that say they are current;
+      # incremental state and the build-script outputs are what regenerate cheaply.
+      #
+      # CARGO_INCREMENTAL=0 below keeps that tree from growing a second copy of everything: a
+      # release build on CI has nothing to reuse an incremental cache from.
+      - name: Cache cargo registry and dependency build
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            host/target
+            host/target/release
           key: cargo-host-${{ matrix.platform }}-${{ matrix.arch }}-${{ hashFiles('host/Cargo.lock') }}
           restore-keys: |
             cargo-host-${{ matrix.platform }}-${{ matrix.arch }}-

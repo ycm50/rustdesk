@@ -506,6 +506,8 @@ lazy_static::lazy_static! {
     // Track connections that are currently using relative mouse movement.
     // Used to disable whiteboard/cursor display for all events while in relative mode.
     static ref RELATIVE_MOUSE_CONNS: Arc<Mutex<std::collections::HashSet<i32>>> = Default::default();
+    // The last left press the peer made, for `note_left_click`.
+    static ref LAST_LEFT_CLICK: Mutex<Option<LeftClick>> = Mutex::new(None);
 }
 
 lazy_static::lazy_static! {
@@ -835,6 +837,50 @@ pub fn is_left_up(evt: &MouseEvent) -> bool {
     let buttons = evt.mask >> 3;
     let evt_type = evt.mask & MOUSE_TYPE_MASK;
     buttons == MOUSE_BUTTON_LEFT && evt_type == MOUSE_TYPE_UP
+}
+
+/// The peer decides a double click on both time and place: Windows compares the two presses
+/// against GetDoubleClickTime (500 ms by default) *and* against a 4 px box (SM_CXDOUBLECLK), and
+/// a tap whose finger crept a couple of pixels between presses misses that box however quick it
+/// was. A press that follows another within [`REMOTE_DOUBLE_CLICK_WINDOW`] and
+/// [`REMOTE_DOUBLE_CLICK_SLOP`] is therefore preceded here by a click at its own position: the
+/// peer pairs that click with the press that follows, which lands on the same point a moment
+/// later, so neither the delay of the link nor the drift of the finger can stop the double click.
+const REMOTE_DOUBLE_CLICK_WINDOW: Duration = Duration::from_secs(1);
+
+/// Two presses further apart than this on screen are two different targets, whatever the delay.
+/// Twenty pixels covers the drift of a finger between two taps on a phone, scaled onto the remote
+/// desktop; the peer's own double click box is far tighter (4 px on Windows), which is why a
+/// replayed click, not this threshold, is what makes the pair match.
+const REMOTE_DOUBLE_CLICK_SLOP: (i32, i32) = (20, 20);
+
+struct LeftClick {
+    at: Instant,
+    pos: (i32, i32),
+}
+
+/// Records a left press and says whether a click must be replayed before it, so the peer still
+/// enters a double click. Called under the ENIGO guard, so the replayed click cannot fall between
+/// another peer event and the press it is replayed for.
+fn note_left_click(x: i32, y: i32) -> bool {
+    let mut last = LAST_LEFT_CLICK.lock().unwrap();
+    let now = Instant::now();
+    let replayed = needs_left_click_replay(last.as_ref(), now, x, y);
+    *last = Some(LeftClick {
+        at: now,
+        pos: (x, y),
+    });
+    replayed
+}
+
+/// Whether a press now, at `x`/`y`, has to be preceded by a replay to be the second half of a
+/// double click the peer can still see; false means the presses alone already are one.
+fn needs_left_click_replay(last: Option<&LeftClick>, now: Instant, x: i32, y: i32) -> bool {
+    last.is_some_and(|click| {
+        now.duration_since(click.at) <= REMOTE_DOUBLE_CLICK_WINDOW
+            && (x - click.pos.0).abs() <= REMOTE_DOUBLE_CLICK_SLOP.0
+            && (y - click.pos.1).abs() <= REMOTE_DOUBLE_CLICK_SLOP.1
+    })
 }
 
 #[cfg(windows)]
@@ -1378,6 +1424,12 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
         }
         MOUSE_TYPE_DOWN => match buttons {
             MOUSE_BUTTON_LEFT => {
+                if note_left_click(evt.x, evt.y) {
+                    // The peer pairs the presses on time and place, and this one misses on at
+                    // least one of them; the click replayed here at the very spot the press is
+                    // about to land on is what it pairs instead. See REMOTE_DOUBLE_CLICK_WINDOW.
+                    en.mouse_click(MouseButton::Left);
+                }
                 allow_err!(en.mouse_down(MouseButton::Left));
             }
             MOUSE_BUTTON_RIGHT => {
@@ -2836,5 +2888,51 @@ mod peer_abs_sample_tests {
         assert!(s.age_ms < 1_000);
         note_pointer_moved_without_absolute_sample();
         assert_eq!(last_peer_abs_sample(), None);
+    }
+}
+
+#[cfg(test)]
+mod left_click_tests {
+    use super::*;
+
+    fn press(at: Instant, pos: (i32, i32)) -> LeftClick {
+        LeftClick { at, pos }
+    }
+
+    #[test]
+    fn a_second_press_within_the_window_replays_the_click() {
+        let first = Instant::now();
+        let last = press(first, (100, 40));
+        let at = |ms| first + Duration::from_millis(ms);
+        // Any gap inside the window: the peer's own 4 px box is what a creeping finger breaks,
+        // so a fast press needs the replay exactly like a slow one.
+        for ms in [120, 300, 600, 900] {
+            assert!(
+                needs_left_click_replay(Some(&last), at(ms), 102, 43),
+                "{ms} ms after the first press is still one double click"
+            );
+        }
+        assert!(needs_left_click_replay(Some(&last), at(1_000), 100, 40));
+    }
+
+    #[test]
+    fn the_position_tolerance_stops_at_the_slop() {
+        let first = Instant::now();
+        let last = press(first, (100, 40));
+        let at = |ms| first + Duration::from_millis(ms);
+        // 20 px of finger drift is still the same target; 21 px is somebody else's.
+        assert!(needs_left_click_replay(Some(&last), at(300), 120, 60));
+        assert!(needs_left_click_replay(Some(&last), at(300), 80, 20));
+        assert!(!needs_left_click_replay(Some(&last), at(300), 121, 40));
+        assert!(!needs_left_click_replay(Some(&last), at(300), 100, 61));
+    }
+
+    #[test]
+    fn a_late_press_is_two_single_clicks() {
+        let first = Instant::now();
+        let last = press(first, (100, 40));
+        let at = |ms| first + Duration::from_millis(ms);
+        assert!(!needs_left_click_replay(Some(&last), at(1_001), 100, 40));
+        assert!(!needs_left_click_replay(None, at(0), 100, 40));
     }
 }
